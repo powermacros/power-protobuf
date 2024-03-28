@@ -1,0 +1,18 @@
+[package]
+name = "power-protobuf"
+version = "0.1.0"
+edition = "2021"
+
+[lib]
+name = "power_porotbuf"
+path = "src/lib.rs"
+proc-macro = true
+
+[dependencies]
+syn = { version = "2", features = ["full", "extra-traits"] }
+proc-macro2 = { version = "1", features = ["span-locations"] }
+quote = { version = "1" }
+convert_case = "0.6"
+syn-prelude = { git = "https://github.com/powermacros/syn-prelude.git" }
+indexmap = { version = "2.0" }
+protobuf = { version = "3.4" }
