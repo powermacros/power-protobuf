@@ -8,9 +8,8 @@ use std::fmt::Write;
 use std::ops::RangeInclusive;
 
 use indexmap::IndexMap;
+use proc_macro::TokenStream;
 use proc_macro2::Span;
-use protobuf::reflect::ReflectValueBox;
-use protobuf::reflect::RuntimeType;
 use syn::punctuated::Punctuated;
 use syn::Ident;
 use syn::LitBool;
@@ -22,6 +21,16 @@ use syn::Token;
 #[derive(Debug, Clone, Hash, PartialEq, Eq)]
 pub struct ProtobufPath {
     pub segments: Punctuated<Ident, Token![.]>,
+}
+
+impl ProtobufPath {
+    pub fn is_bulitin(&self) -> bool {
+        // FIXME:
+        if let Some(first) = self.segments.first() {
+            return first.eq("google");
+        }
+        false
+    }
 }
 
 impl fmt::Display for ProtobufPath {
@@ -47,7 +56,7 @@ pub enum Syntax {
 
 /// A field rule
 #[derive(Debug, Clone, Copy, Eq, PartialEq, Hash)]
-pub enum Rule {
+pub enum Modifier {
     /// A well-formed message can have zero or one of this field (but not more than one).
     Optional,
     /// This field can be repeated any number of times (including zero) in a well-formed message.
@@ -57,12 +66,12 @@ pub enum Rule {
     Required,
 }
 
-impl Rule {
+impl Modifier {
     pub const fn as_str(&self) -> &'static str {
         match self {
-            Rule::Optional => "optional",
-            Rule::Repeated => "repeated",
-            Rule::Required => "required",
+            Modifier::Optional => "optional",
+            Modifier::Repeated => "repeated",
+            Modifier::Required => "required",
         }
     }
 }
@@ -173,8 +182,9 @@ pub enum FieldType {
 pub struct Field {
     /// Field name
     pub name: Ident,
+    pub field_name: Ident,
     /// Field `Rule`
-    pub rule: Option<Rule>,
+    pub modifier: Option<Modifier>,
     /// Field type
     pub typ: FieldType,
     /// Tag number
@@ -190,11 +200,20 @@ pub enum FieldOrOneOf {
     OneOf(OneOf),
 }
 
+#[derive(Debug, Clone, Copy)]
+pub enum NestedTypeIndex {
+    Message(usize),
+    Enum(usize),
+    Oneof(usize),
+}
+
 /// A protobuf message
 #[derive(Debug, Clone)]
 pub struct Message {
     /// Message name
     pub name: Ident,
+    pub struct_name: Ident,
+    pub nested_mod_name: Ident,
     /// Message fields and oneofs
     pub fields: Vec<FieldOrOneOf>,
     /// Message reserved numbers
@@ -211,6 +230,7 @@ pub struct Message {
     pub extension_ranges: Vec<RangeInclusive<i32>>,
     /// Extensions
     pub extensions: Vec<Extension>,
+    pub nested_types: Vec<NestedTypeIndex>,
 }
 
 impl Message {
@@ -268,6 +288,10 @@ impl Message {
 pub struct EnumValue {
     /// enum value name
     pub name: Ident,
+    /// variant name from Self::name
+    pub variant_name: Ident,
+    /// proto_name from Self::name
+    pub proto_name: LitStr,
     /// enum value number
     pub number: LitInt,
     /// enum value options
@@ -294,6 +318,10 @@ pub struct Enumeration {
 pub struct OneOf {
     /// OneOf name
     pub name: Ident,
+    pub field_name: Ident,
+    pub field_lit: LitStr,
+    pub enum_name: Ident,
+    pub tags: LitStr,
     /// OneOf fields
     pub fields: Vec<Field>,
     /// oneof options
@@ -313,6 +341,7 @@ pub struct Extension {
 pub struct Method {
     /// Method name
     pub name: Ident,
+    pub method_name: Ident,
     /// Input type
     pub input_type: ProtobufPath,
     /// Output type
@@ -332,6 +361,7 @@ pub struct Method {
 pub struct Service {
     /// Service name
     pub name: Ident,
+    pub code_name: Ident,
     pub methods: Vec<Method>,
     pub options: Vec<ProtobufOption>,
 }
@@ -451,25 +481,25 @@ impl ProtobufConstant {
         }
     }
 
-    /** Interpret .proto constant as an reflection value. */
-    pub fn as_type(&self, ty: RuntimeType) -> syn::Result<ReflectValueBox> {
-        match (self, &ty) {
-            (ProtobufConstant::Ident(ident), RuntimeType::Enum(e)) => {
-                if let Some(v) = e.value_by_name(&ident.to_string()) {
-                    return Ok(ReflectValueBox::Enum(e.clone(), v.value()));
-                }
-            }
-            (ProtobufConstant::Bool(b), RuntimeType::Bool) => {
-                return Ok(ReflectValueBox::Bool(b.value()))
-            }
-            (ProtobufConstant::String(lit), RuntimeType::String) => {
-                return Ok(ReflectValueBox::String(lit.value()))
-            }
-            _ => {}
-        }
-        todo!("not impl")
-        // Err(syn::Error::new(self., message))
-    }
+    // /** Interpret .proto constant as an reflection value. */
+    // pub fn as_type(&self, ty: RuntimeType) -> syn::Result<ReflectValueBox> {
+    //     match (self, &ty) {
+    //         (ProtobufConstant::Ident(ident), RuntimeType::Enum(e)) => {
+    //             if let Some(v) = e.value_by_name(&ident.to_string()) {
+    //                 return Ok(ReflectValueBox::Enum(e.clone(), v.value()));
+    //             }
+    //         }
+    //         (ProtobufConstant::Bool(b), RuntimeType::Bool) => {
+    //             return Ok(ReflectValueBox::Bool(b.value()))
+    //         }
+    //         (ProtobufConstant::String(lit), RuntimeType::String) => {
+    //             return Ok(ReflectValueBox::String(lit.value()))
+    //         }
+    //         _ => {}
+    //     }
+    //     todo!("not impl")
+    //     // Err(syn::Error::new(self., message))
+    // }
 }
 
 /// Equivalent of `UninterpretedOption.NamePart`.
@@ -518,10 +548,53 @@ impl fmt::Display for ProtobufOptionName {
     }
 }
 
+impl ProtobufOptionName {
+    pub fn is_option(&self, opt_name: &str) -> bool {
+        match self {
+            ProtobufOptionName::Builtin(name) => name.eq(opt_name),
+            ProtobufOptionName::Ext(ext) => {
+                let mut compared_index = 0;
+                for (index, n) in opt_name.split('.').enumerate() {
+                    if let Some(seg) = ext.0.get(index) {
+                        match seg {
+                            ProtobufOptionNamePart::Direct(d) => {
+                                if !d.eq(n) {
+                                    return false;
+                                }
+                            }
+                            ProtobufOptionNamePart::Ext(ext) => return false,
+                        }
+                    } else {
+                        return false;
+                    }
+                    compared_index = index;
+                }
+                ext.0.len() == compared_index + 1
+            }
+        }
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct ProtobufOption {
     pub name: ProtobufOptionName,
     pub value: ProtobufConstant,
+}
+
+pub trait GetOption {
+    fn get_option<'a>(&'a self, name: &str) -> Option<&'a ProtobufOption>;
+}
+
+impl GetOption for Vec<ProtobufOption> {
+    fn get_option<'a>(&'a self, name: &str) -> Option<&'a ProtobufOption> {
+        self.iter().find(|opt| opt.name.is_option(name))
+    }
+}
+
+impl<P> GetOption for Punctuated<ProtobufOption, P> {
+    fn get_option<'a>(&'a self, name: &str) -> Option<&'a ProtobufOption> {
+        self.iter().find(|opt| opt.name.is_option(name))
+    }
 }
 
 /// Visibility of import statement
