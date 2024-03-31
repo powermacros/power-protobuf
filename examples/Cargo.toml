@@ -1,0 +1,22 @@
+[package]
+authors = ["CKF <powermacros@karfield.com>"]
+edition = "2021"
+license = "MIT"
+name = "examples"
+publish = false
+version = "0.1.0"
+
+[[bin]]
+name = "helloworld-server"
+path = "src/hellowworld/server.rs"
+
+[[bin]]
+name = "helloworld-client"
+path = "src/helloworld/client.rs"
+
+[dependencies]
+tokio = { version = "1.0", features = ["rt-multi-thread", "macros"] }
+power-protobuf = { path = ".." }
+tonic = { version = "*" }
+prost = { version = "*" }
+prost-types = { version = "*" }
