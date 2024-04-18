@@ -84,7 +84,7 @@ impl Message {
                 .collect::<Vec<_>>();
 
             Some(quote! {
-                mod #nested_mod_name {
+                pub mod #nested_mod_name {
                     #(#nested)*
                 }
             })
@@ -163,12 +163,7 @@ impl Field {
 
 impl Service {
     fn to_tokens(&self, package: &Option<Package>) -> TokenStream {
-        let Self {
-            name,
-            code_name: trait_name,
-            methods,
-            ..
-        } = self;
+        let Self { name, .. } = self;
 
         let service_name = if let Some(package) = package.as_ref() {
             name.to_lit_str().with_prefix(package.package.to_string())
@@ -176,33 +171,10 @@ impl Service {
             name.to_lit_str()
         };
 
-        let methods = methods
-            .iter()
-            .map(
-                |Method {
-                     method_name,
-                     input_type,
-                     output_type,
-                     options,
-                     ..
-                 }| {
-                    let deprecated = options.deprecated();
-                    quote! {
-                        #deprecated
-                        fn #method_name(_: #input_type) -> #output_type;
-                    }
-                },
-            )
-            .collect::<Vec<_>>();
-
         let client = self.impl_client(&service_name);
         let server = self.impl_server(&service_name);
 
         quote! {
-            trait #trait_name {
-                #(#methods)*
-            }
-
             #client
             #server
         }
@@ -222,7 +194,7 @@ impl Service {
             .collect::<Vec<_>>();
 
         quote! {
-            mod #client_mod {
+            pub mod #client_mod {
                 #![allow(unused_variables, dead_code, missing_docs, clippy::let_unit_value)]
                 use tonic::codegen::*;
                 use tonic::codegen::http::Uri;
@@ -335,7 +307,7 @@ impl Service {
             .collect::<Vec<_>>();
 
         quote! {
-            mod #server_mod {
+            pub mod #server_mod {
                 #![allow(unused_variables, dead_code, missing_docs, clippy::let_unit_value)]
                 use tonic::codegen::*;
 
