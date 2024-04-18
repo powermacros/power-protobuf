@@ -15,16 +15,8 @@ protobuf! {
       }) returns (HelloReply) {}
     }
 
-    // The request message containing the user's name.
-    message HelloRequest {
-      string name
-    }
-
     // The response message containing the greetings
     message HelloReply {
       string message = 1;
-      string p
     }
 }
-
-fn sd() {}

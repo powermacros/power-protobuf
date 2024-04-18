@@ -46,6 +46,7 @@ pub struct ExternalType {
     pub source_path: PathBuf,
     pub package: String,
     pub type_name: String,
+    pub type_path_segments: Vec<String>,
     pub is_message: bool,
 }
 
@@ -202,12 +203,47 @@ impl TypeResolver {
             }
 
             if p.exists() {
+                let mut segments = if let Ok(rel) = p.strip_prefix(&self.src_dir) {
+                    let i = rel.iter();
+                    rel.iter()
+                        .filter_map(|s| {
+                            let s = s.to_string_lossy();
+                            if s.ends_with(".rs") {
+                                // should be the last
+                                if s.eq("mod.rs") || s.eq("lib.rs") {
+                                    None
+                                } else {
+                                    Some(s.trim_end_matches(".rs").to_owned())
+                                }
+                            } else {
+                                Some(s.to_string())
+                            }
+                        })
+                        .collect::<Vec<_>>()
+                } else {
+                    vec![]
+                };
+
+                segments.insert(0, "crate".to_owned());
                 if let Some(types) = self.cache.get(&p) {
-                    return Self::lookup_in_types(error_span, &p, types, iter, last_seg_number);
+                    return Self::lookup_in_types(
+                        error_span,
+                        &p,
+                        types,
+                        iter,
+                        last_seg_number,
+                        segments,
+                    );
                 } else {
                     let types = scan_types(error_span, &p)?;
-                    let result =
-                        Self::lookup_in_types(error_span, &p, &types, iter, last_seg_number);
+                    let result = Self::lookup_in_types(
+                        error_span,
+                        &p,
+                        &types,
+                        iter,
+                        last_seg_number,
+                        segments,
+                    );
                     self.cache.insert(p, types);
                     return result;
                 }
@@ -223,6 +259,7 @@ impl TypeResolver {
         types: &HashMap<String, PbTypes>,
         iter: &'a mut impl Iterator<Item = (usize, &'a Ident)>,
         last_seg_number: usize,
+        mut segments: Vec<String>,
     ) -> syn::Result<Option<ExternalType>> {
         if let Some((index, mut name)) = iter.next() {
             let mut package_name = "".to_owned();
@@ -238,18 +275,21 @@ impl TypeResolver {
                         ));
                     }
                     name = n;
+                    segments.push(package_name.clone());
                     types.get(&package_name)
                 } else {
                     unreachable!()
                 }
             } {
                 let ty_name = name.to_string();
+                segments.push(ty_name.clone());
                 if elements.messages.contains(&ty_name) {
                     Ok(Some(ExternalType {
                         source_path: path.as_ref().to_path_buf(),
                         package: package_name,
                         type_name: ty_name,
                         is_message: true,
+                        type_path_segments: segments,
                     }))
                 } else if elements.enums.contains(&ty_name) {
                     Ok(Some(ExternalType {
@@ -257,6 +297,7 @@ impl TypeResolver {
                         package: package_name,
                         type_name: ty_name,
                         is_message: true,
+                        type_path_segments: segments,
                     }))
                 } else {
                     Err(syn::Error::new(error_span, "no such type"))

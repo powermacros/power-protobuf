@@ -73,6 +73,13 @@ impl ProtobufPath {
     pub fn is_local(&self) -> bool {
         self.segments.len() == 1
     }
+    pub fn is_relative(&self) -> bool {
+        if let Some(first) = self.segments.first() {
+            first.eq("super")
+        } else {
+            false
+        }
+    }
 }
 
 /// Protobuf syntax.
@@ -260,15 +267,15 @@ impl FieldType {
         }
     }
 
-    pub fn resolve_with_inside(&mut self, inside_types: &HashMap<String, (bool, Span)>) -> bool {
+    pub fn resolve_with_inside(&mut self, inside_types: &HashMap<Ident, (bool, Span)>) -> bool {
         match self {
             Self::MessageOrEnum(t) => {
                 if let ResolvedType::Unresolved = t.resolved_type {
                     if t.type_path.is_local() {
-                        let name = t.type_path.local_name().to_string();
-                        if let Some((is_message, span)) = inside_types.get(&name) {
+                        if let Some((is_message, span)) = inside_types.get(t.type_path.local_name())
+                        {
                             t.resolved_type = ResolvedType::ProtocolInside(ProtocolInsideType {
-                                name: (name, *span).to_ident(),
+                                name: (t.type_path.local_name().to_string(), *span).to_ident(),
                                 is_message: *is_message,
                             });
                             true
@@ -521,13 +528,16 @@ pub struct Extension {
 pub struct Method {
     /// Method name
     pub name: Ident,
+    // snake case name
     pub method_name: Ident,
     pub input_message: Option<Message>,
     /// Input type
     pub input_type: ProtobufPath,
+    pub input_type_ref: ResolvedType,
     pub output_message: Option<Message>,
     /// Output type
     pub output_type: ProtobufPath,
+    pub output_type_ref: ResolvedType,
     /// If this method is client streaming
     #[allow(dead_code)] // TODO
     pub client_streaming: Option<Span>,

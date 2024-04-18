@@ -5,11 +5,12 @@ use proc_macro2::Span;
 use syn::{
     parse::{Parse, ParseBuffer, ParseStream},
     punctuated::Punctuated,
+    spanned::Spanned,
     token, Ident, LitBool, LitInt, LitStr, Token,
 };
 use syn_prelude::{
-    JoinSynErrors, ParseAsIdent, ToErr, ToIdentWithCase, ToLitStr, ToSynError, TryParseAsIdent,
-    TryParseOneOfIdents, WithPrefix, WithSuffix,
+    JoinSynErrors, ParseAsIdent, ToErr, ToIdent, ToIdentWithCase, ToLitStr, ToSynError,
+    TryParseAsIdent, TryParseOneOfIdents, WithPrefix, WithSuffix,
 };
 
 use crate::{
@@ -20,7 +21,7 @@ use crate::{
         ProtobufOption, ProtobufOptionName, ProtobufOptionNameExt, ProtobufOptionNamePart,
         ProtobufPath, Protocol, Service, Syntax, TagValue, TypeRef,
     },
-    resolve::{InnerType, ResolvedType, TypeResolver},
+    resolve::{InnerType, ProtocolInsideType, ResolvedType, TypeResolver},
 };
 
 impl Parse for Protocol {
@@ -96,10 +97,10 @@ impl Parse for Protocol {
         let mut inside_types = protocol
             .messages
             .iter()
-            .map(|m| (m.name.to_string(), (true, m.name.span())))
+            .map(|m| (m.name.clone(), (true, m.name.span())))
             .collect::<HashMap<_, _>>();
         protocol.enums.iter().for_each(|e| {
-            inside_types.insert(e.name.to_string(), (false, e.name.span()));
+            inside_types.insert(e.name.clone(), (false, e.name.span()));
         });
 
         if let Some(err) = protocol
@@ -133,6 +134,23 @@ impl Parse for Protocol {
             .join_errors()
         {
             return Err(err);
+        }
+
+        match protocol
+            .services
+            .iter_mut()
+            .filter_map(|s| {
+                s.methods
+                    .iter_mut()
+                    .map(|m| m.resolve_params(&inside_types, &mut resolver))
+                    .collect::<Vec<_>>()
+                    .join_errors()
+            })
+            .collect::<Vec<_>>()
+            .join_errors()
+        {
+            Some(err) => return err.to_err(),
+            None => {}
         };
 
         Ok(protocol)
@@ -480,11 +498,84 @@ impl Method {
             client_streaming,
             input_message,
             input_type,
+            input_type_ref: ResolvedType::Unresolved,
             server_streaming,
             output_message,
             output_type,
+            output_type_ref: ResolvedType::Unresolved,
             options,
         })
+    }
+
+    fn resolve_params(
+        &mut self,
+        inside_types: &HashMap<Ident, (bool, Span)>,
+        resolver: &mut TypeResolver,
+    ) -> syn::Result<()> {
+        let input_err = match Self::resolve_param_type(
+            &self.input_message,
+            &self.input_type,
+            inside_types,
+            resolver,
+        ) {
+            Ok(ty) => {
+                self.input_type_ref = ty;
+                None
+            }
+            Err(err) => Some(err),
+        };
+        let output_err = match Self::resolve_param_type(
+            &self.output_message,
+            &self.output_type,
+            inside_types,
+            resolver,
+        ) {
+            Ok(ty) => {
+                self.output_type_ref = ty;
+                None
+            }
+            Err(err) => Some(err),
+        };
+        let err = if let Some(mut err) = input_err {
+            if let Some(e) = output_err {
+                err.combine(e)
+            }
+            err
+        } else if let Some(err) = output_err {
+            err
+        } else {
+            return Ok(());
+        };
+        Err(err)
+    }
+
+    fn resolve_param_type(
+        param_type: &Option<Message>,
+        type_path: &ProtobufPath,
+        inside_types: &HashMap<Ident, (bool, Span)>,
+        resolver: &mut TypeResolver,
+    ) -> syn::Result<ResolvedType> {
+        if let Some(generated) = param_type {
+            Ok(ResolvedType::ProtocolInside(ProtocolInsideType {
+                name: generated.name.clone(),
+                is_message: true,
+            }))
+        } else if type_path.is_local() {
+            if let Some((is_message, span)) = inside_types.get(type_path.local_name()) {
+                Ok(ResolvedType::ProtocolInside(ProtocolInsideType {
+                    name: (type_path.local_name().to_string(), *span).to_ident(),
+                    is_message: *is_message,
+                }))
+            } else {
+                type_path.span().to_syn_error("no such type").to_err()
+            }
+        } else {
+            if let Some(ty) = resolver.resolve(type_path)? {
+                Ok(ty)
+            } else {
+                type_path.span().to_syn_error("no such type").to_err()
+            }
+        }
     }
 }
 
@@ -1050,7 +1141,7 @@ impl Field {
 
     fn resolve_type(
         &mut self,
-        inside_types: &HashMap<String, (bool, Span)>,
+        inside_types: &HashMap<Ident, (bool, Span)>,
         resolver: &mut TypeResolver,
     ) -> syn::Result<()> {
         if self.typ.is_unresolved() {

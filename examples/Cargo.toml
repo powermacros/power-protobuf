@@ -21,3 +21,4 @@ tonic = { version = "*" }
 prost = { version = "*" }
 prost-types = { version = "*" }
 serde = { version = "1", features = ["derive"] }
+http = { version = "*" }
