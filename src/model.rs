@@ -3,34 +3,31 @@
 //! This crate can be seen as a rust transcription of the
 //! [descriptor.proto](https://github.com/google/protobuf/blob/master/src/google/protobuf/descriptor.proto) file
 
+use std::collections::HashMap;
 use std::fmt;
 use std::fmt::Write;
 use std::ops::RangeInclusive;
 
 use indexmap::IndexMap;
-use proc_macro::TokenStream;
 use proc_macro2::Span;
 use syn::punctuated::Punctuated;
+use syn::spanned::Spanned;
 use syn::Ident;
 use syn::LitBool;
 use syn::LitFloat;
 use syn::LitInt;
 use syn::LitStr;
 use syn::Token;
+use syn_prelude::ToIdent;
+use syn_prelude::ToLitStr;
+
+use crate::resolve::ProtocolInsideType;
+use crate::resolve::ResolvedType;
+use crate::resolve::TypeResolver;
 
 #[derive(Debug, Clone, Hash, PartialEq, Eq)]
 pub struct ProtobufPath {
     pub segments: Punctuated<Ident, Token![.]>,
-}
-
-impl ProtobufPath {
-    pub fn is_bulitin(&self) -> bool {
-        // FIXME:
-        if let Some(first) = self.segments.first() {
-            return first.eq("google");
-        }
-        false
-    }
 }
 
 impl fmt::Display for ProtobufPath {
@@ -45,6 +42,39 @@ impl fmt::Display for ProtobufPath {
     }
 }
 
+impl ProtobufPath {
+    pub fn from_ident(name: Ident) -> Self {
+        let mut slf = Self {
+            segments: Punctuated::new(),
+        };
+        slf.segments.push(name);
+        slf
+    }
+
+    pub fn new_empty(span: Span) -> Self {
+        let mut segments = Punctuated::new();
+        segments.push_value(("google", span).to_ident());
+        segments.push_punct(Token![.](span));
+        segments.push_value(("protobuf", span).to_ident());
+        segments.push_punct(Token![.](span));
+        segments.push(("Empty", span).to_ident());
+        Self { segments }
+    }
+}
+
+impl ProtobufPath {
+    pub fn local_name(&self) -> &Ident {
+        if let Some(last) = self.segments.last() {
+            return last;
+        } else {
+            unreachable!()
+        }
+    }
+    pub fn is_local(&self) -> bool {
+        self.segments.len() == 1
+    }
+}
+
 /// Protobuf syntax.
 #[derive(Debug, Clone, Copy)]
 pub enum Syntax {
@@ -52,6 +82,15 @@ pub enum Syntax {
     Proto2(Option<Span>),
     /// Protobuf syntax [3](https://developers.google.com/protocol-buffers/docs/proto3)
     Proto3(Span),
+}
+
+impl Syntax {
+    pub fn version(&self) -> usize {
+        match self {
+            Self::Proto2(_) => 2,
+            Self::Proto3(_) => 3,
+        }
+    }
 }
 
 /// A field rule
@@ -170,11 +209,150 @@ pub enum FieldType {
     /// Protobut float
     Float(Span),
     /// Protobuf message or enum (holds the name)
-    MessageOrEnum(ProtobufPath),
+    MessageOrEnum(TypeRef),
     /// Protobut map
-    Map(Box<(FieldType, FieldType)>),
+    Map(MapType),
     /// Protobuf group (deprecated)
     Group(Group),
+}
+
+#[derive(Debug, Clone)]
+pub struct MapType {
+    pub span: Span,
+    pub key: Box<FieldType>,
+    pub value: Box<FieldType>,
+}
+
+impl FieldType {
+    pub fn span(&self) -> Span {
+        match self {
+            Self::Int32(span) => *span,
+            Self::Int64(span) => *span,
+            Self::Uint32(span) => *span,
+            Self::Uint64(span) => *span,
+            Self::Sint32(span) => *span,
+            Self::Sint64(span) => *span,
+            Self::Bool(span) => *span,
+            Self::Fixed64(span) => *span,
+            Self::Sfixed64(span) => *span,
+            Self::Double(span) => *span,
+            Self::String(span) => *span,
+            Self::Bytes(span) => *span,
+            Self::Fixed32(span) => *span,
+            Self::Sfixed32(span) => *span,
+            Self::Float(span) => *span,
+            Self::MessageOrEnum(t) => t.type_path.span(),
+            Self::Map(map) => map.span,
+            Self::Group(group) => group.name.span(),
+        }
+    }
+    pub fn is_unresolved(&self) -> bool {
+        match self {
+            Self::MessageOrEnum(t) => {
+                if let ResolvedType::Unresolved = t.resolved_type {
+                    true
+                } else {
+                    false
+                }
+            }
+            Self::Map(map) => map.key.is_unresolved() || map.value.is_unresolved(),
+            _ => false,
+        }
+    }
+
+    pub fn resolve_with_inside(&mut self, inside_types: &HashMap<String, (bool, Span)>) -> bool {
+        match self {
+            Self::MessageOrEnum(t) => {
+                if let ResolvedType::Unresolved = t.resolved_type {
+                    if t.type_path.is_local() {
+                        let name = t.type_path.local_name().to_string();
+                        if let Some((is_message, span)) = inside_types.get(&name) {
+                            t.resolved_type = ResolvedType::ProtocolInside(ProtocolInsideType {
+                                name: (name, *span).to_ident(),
+                                is_message: *is_message,
+                            });
+                            true
+                        } else {
+                            false
+                        }
+                    } else {
+                        false
+                    }
+                } else {
+                    true
+                }
+            }
+            Self::Map(map) => {
+                let key_is_resolved = map.key.resolve_with_inside(inside_types);
+                let value_is_resolved = map.value.resolve_with_inside(inside_types);
+                key_is_resolved && value_is_resolved
+            }
+            _ => true,
+        }
+    }
+
+    pub fn resolve_with_resolver(&mut self, resolver: &mut TypeResolver) -> syn::Result<bool> {
+        match self {
+            Self::MessageOrEnum(t) => {
+                if let ResolvedType::Unresolved = t.resolved_type {
+                    if let Some(typ) = resolver.resolve(&t.type_path)? {
+                        t.resolved_type = typ;
+                        Ok(true)
+                    } else {
+                        Ok(false)
+                    }
+                } else {
+                    Ok(true)
+                }
+            }
+            Self::Map(map) => {
+                let key_is_resolved = if map.key.is_unresolved() {
+                    map.key.resolve_with_resolver(resolver)?
+                } else {
+                    true
+                };
+                let value_is_resolved = if map.value.is_unresolved() {
+                    map.value.resolve_with_resolver(resolver)?
+                } else {
+                    true
+                };
+                Ok(key_is_resolved && value_is_resolved)
+            }
+            _ => Ok(true),
+        }
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct TypeRef {
+    pub type_path: ProtobufPath,
+    pub resolved_type: ResolvedType,
+}
+
+#[derive(Debug, Clone)]
+pub enum TagValue {
+    Value(Span, i32),
+    AutoIncr,
+}
+
+impl TagValue {
+    pub fn number(&self) -> i32 {
+        if let Self::Value(_, value) = self {
+            *value
+        } else {
+            -1
+        }
+    }
+}
+
+impl ToLitStr for TagValue {
+    fn to_lit_str(&self) -> LitStr {
+        if let Self::Value(span, value) = self {
+            LitStr::new(&format!("{}", value), *span)
+        } else {
+            unreachable!()
+        }
+    }
 }
 
 /// A Protobuf Field
@@ -188,14 +366,14 @@ pub struct Field {
     /// Field type
     pub typ: FieldType,
     /// Tag number
-    pub number: LitInt,
+    pub tag: TagValue,
     /// Non-builtin options
     pub options: Vec<ProtobufOption>,
 }
 
 /// A Protobuf field of oneof group
 #[derive(Debug, Clone)]
-pub enum FieldOrOneOf {
+pub enum MessageElement {
     Field(Field),
     OneOf(OneOf),
 }
@@ -213,9 +391,9 @@ pub struct Message {
     /// Message name
     pub name: Ident,
     pub struct_name: Ident,
-    pub nested_mod_name: Ident,
+    pub nested_mod_name: Option<Ident>,
     /// Message fields and oneofs
-    pub fields: Vec<FieldOrOneOf>,
+    pub fields: Vec<MessageElement>,
     /// Message reserved numbers
     pub reserved_nums: Vec<RangeInclusive<i32>>,
     /// Message reserved names
@@ -238,8 +416,8 @@ impl Message {
         self.fields
             .iter()
             .flat_map(|fo| match &fo {
-                FieldOrOneOf::Field(f) => vec![f],
-                FieldOrOneOf::OneOf(o) => o.fields.iter().collect(),
+                MessageElement::Field(f) => vec![f],
+                MessageElement::OneOf(o) => o.fields.iter().collect(),
             })
             .collect()
     }
@@ -266,8 +444,8 @@ impl Message {
         self.fields
             .iter()
             .flat_map(|fo| match &fo {
-                FieldOrOneOf::Field(f) => Some(f),
-                FieldOrOneOf::OneOf(_) => None,
+                MessageElement::Field(f) => Some(f),
+                MessageElement::OneOf(_) => None,
             })
             .collect()
     }
@@ -276,8 +454,8 @@ impl Message {
         self.fields
             .iter()
             .flat_map(|fo| match &fo {
-                FieldOrOneOf::Field(_) => None,
-                FieldOrOneOf::OneOf(o) => Some(o),
+                MessageElement::Field(_) => None,
+                MessageElement::OneOf(o) => Some(o),
             })
             .collect()
     }
@@ -293,7 +471,7 @@ pub struct EnumValue {
     /// proto_name from Self::name
     pub proto_name: LitStr,
     /// enum value number
-    pub number: LitInt,
+    pub tag: Option<LitInt>,
     /// enum value options
     pub options: Option<Punctuated<ProtobufOption, Token![,]>>,
 }
@@ -301,6 +479,7 @@ pub struct EnumValue {
 /// A protobuf enumerator
 #[derive(Debug, Clone)]
 pub struct Enumeration {
+    pub nested_mod_name: Option<Ident>,
     /// enum name
     pub name: Ident,
     /// enum values
@@ -319,6 +498,7 @@ pub struct OneOf {
     /// OneOf name
     pub name: Ident,
     pub field_name: Ident,
+    pub nested_mod_name: Ident,
     pub field_lit: LitStr,
     pub enum_name: Ident,
     pub tags: LitStr,
@@ -342,8 +522,10 @@ pub struct Method {
     /// Method name
     pub name: Ident,
     pub method_name: Ident,
+    pub input_message: Option<Message>,
     /// Input type
     pub input_type: ProtobufPath,
+    pub output_message: Option<Message>,
     /// Output type
     pub output_type: ProtobufPath,
     /// If this method is client streaming

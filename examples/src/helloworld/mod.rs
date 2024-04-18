@@ -7,21 +7,24 @@ protobuf! {
     option java_package = "io.grpc.examples.helloworld";
     option java_outer_classname = "HelloWorldProto";
 
-    package helloworld;
-
     // The greeting service definition.
     service Greeter {
       // Sends a greeting
-      rpc SayHello (HelloRequest) returns (HelloReply) {}
+      rpc SayHello ({
+        string name
+      }) returns (HelloReply) {}
     }
 
     // The request message containing the user's name.
     message HelloRequest {
-      string name = 1;
+      string name
     }
 
     // The response message containing the greetings
     message HelloReply {
       string message = 1;
+      string p
     }
 }
+
+fn sd() {}

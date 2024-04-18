@@ -13,5 +13,18 @@ syn = { version = "2", features = ["full", "extra-traits"] }
 proc-macro2 = { version = "1", features = ["span-locations"] }
 quote = { version = "1" }
 convert_case = "0.6"
-syn-prelude = { git = "https://github.com/powermacros/syn-prelude.git" }
+syn-prelude = { git = "https://github.com/powermacros/syn-prelude.git", rev = "55ef6c1" }
 indexmap = { version = "2.0" }
+nom = "7"
+
+[features]
+default = ["impl_prost", "tagless", "simplize_rpc_params", "derive_serde"]
+# impl_prost: use tonic/prost to implement the protobuf codec and grpc stuff.
+impl_prost = []
+# impl_protobuf_rs: use 'stepancheg/rust-protobuf' to implement the protbuf codec.
+impl_protobuf_rs = []
+# enable serde macro derives
+derive_serde = []
+# tagless: allows auto increduce tag number by previous tag, if the begging tag is not exists, initial value will be set defaultly (message begins with 1, enum begins with 0).
+tagless = []
+simplize_rpc_params = []

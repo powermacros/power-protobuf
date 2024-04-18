@@ -1,26 +1,31 @@
-use std::ops::RangeInclusive;
+use std::{collections::HashMap, ops::RangeInclusive};
 
 use convert_case::Case;
+use proc_macro2::Span;
 use syn::{
     parse::{Parse, ParseBuffer, ParseStream},
     punctuated::Punctuated,
     token, Ident, LitBool, LitInt, LitStr, Token,
 };
 use syn_prelude::{
-    ParseAsIdent, ToErr, ToIdentWithCase, ToLitStr, ToSynError, TryParseAsIdent,
-    TryParseOneOfIdents,
+    JoinSynErrors, ParseAsIdent, ToErr, ToIdentWithCase, ToLitStr, ToSynError, TryParseAsIdent,
+    TryParseOneOfIdents, WithPrefix, WithSuffix,
 };
 
-use crate::model::{
-    AnyTypeUrl, DeclIndex, EnumValue, Enumeration, Extension, Field, FieldOrOneOf, FieldType,
-    Group, Import, ImportVis, Message, Method, Modifier, NestedTypeIndex, OneOf, Package,
-    ProtobufConstant, ProtobufConstantMessage, ProtobufConstantMessageFieldName, ProtobufOption,
-    ProtobufOptionName, ProtobufOptionNameExt, ProtobufOptionNamePart, ProtobufPath, Protocol,
-    Service, Syntax,
+use crate::{
+    model::{
+        AnyTypeUrl, DeclIndex, EnumValue, Enumeration, Extension, Field, FieldType, Group, Import,
+        ImportVis, MapType, Message, MessageElement, Method, Modifier, NestedTypeIndex, OneOf,
+        Package, ProtobufConstant, ProtobufConstantMessage, ProtobufConstantMessageFieldName,
+        ProtobufOption, ProtobufOptionName, ProtobufOptionNameExt, ProtobufOptionNamePart,
+        ProtobufPath, Protocol, Service, Syntax, TagValue, TypeRef,
+    },
+    resolve::{InnerType, ResolvedType, TypeResolver},
 };
 
 impl Parse for Protocol {
     fn parse(input: ParseStream) -> syn::Result<Self> {
+        let mut resolver = TypeResolver::new();
         let syntax: Syntax = input.parse()?;
         let mut protocol = Self {
             imports: Default::default(),
@@ -34,28 +39,43 @@ impl Parse for Protocol {
             decls: Default::default(),
         };
 
-        let proto2 = if let Syntax::Proto2(_) = &syntax {
-            true
-        } else {
-            false
-        };
+        let proto_version = syntax.version();
 
         while !input.is_empty() {
             if input.peek(Token![;]) {
                 input.parse::<Token![;]>()?;
                 continue;
             }
-            if let Some(message) = Message::try_parse(input, proto2)? {
+            if let Some(message) = Message::try_parse(input, proto_version, None)? {
                 protocol
                     .decls
                     .push(DeclIndex::Message(protocol.messages.len()));
                 protocol.messages.push(message);
-            } else if let Some(service) = Service::try_parse(input, proto2)? {
+            } else if let Some(service) = Service::try_parse(input, proto_version)? {
                 protocol
                     .decls
                     .push(DeclIndex::Service(protocol.services.len()));
+                let messages = service
+                    .methods
+                    .iter()
+                    .map(|s| match (&s.input_message, &s.output_message) {
+                        (None, None) => None,
+                        (None, Some(o)) => Some(vec![o.clone()]),
+                        (Some(i), None) => Some(vec![i.clone()]),
+                        (Some(i), Some(o)) => Some(vec![i.clone(), o.clone()]),
+                    })
+                    .flatten()
+                    .flatten()
+                    .collect::<Vec<_>>();
+
                 protocol.services.push(service);
-            } else if let Some(enumeration) = Enumeration::try_parse(input, proto2)? {
+                for message in messages {
+                    protocol
+                        .decls
+                        .push(DeclIndex::Message(protocol.messages.len()));
+                    protocol.messages.push(message);
+                }
+            } else if let Some(enumeration) = Enumeration::try_parse(input, proto_version, None)? {
                 protocol.decls.push(DeclIndex::Enum(protocol.enums.len()));
                 protocol.enums.push(enumeration);
             } else if let Some(import) = Import::try_parse(input)? {
@@ -64,7 +84,7 @@ impl Parse for Protocol {
                 protocol.options.push(option);
             } else if let Some(package) = Package::try_parse(input)? {
                 protocol.package = Some(package);
-            } else if let Some(ext) = Extension::try_parse(input, proto2)? {
+            } else if let Some(ext) = Extension::try_parse(input, proto_version)? {
                 protocol.extensions.extend(ext);
             } else {
                 input.span().to_syn_error("unexpected token").to_err()?;
@@ -72,6 +92,48 @@ impl Parse for Protocol {
         }
 
         protocol.syntax = syntax;
+
+        let mut inside_types = protocol
+            .messages
+            .iter()
+            .map(|m| (m.name.to_string(), (true, m.name.span())))
+            .collect::<HashMap<_, _>>();
+        protocol.enums.iter().for_each(|e| {
+            inside_types.insert(e.name.to_string(), (false, e.name.span()));
+        });
+
+        if let Some(err) = protocol
+            .messages
+            .iter_mut()
+            .map(|m| {
+                match m
+                    .fields
+                    .iter_mut()
+                    .map(|f| match f {
+                        MessageElement::Field(f) => f.resolve_type(&inside_types, &mut resolver),
+                        MessageElement::OneOf(oneof) => match oneof
+                            .fields
+                            .iter_mut()
+                            .map(|f| f.resolve_type(&inside_types, &mut resolver))
+                            .collect::<Vec<syn::Result<_>>>()
+                            .join_errors()
+                        {
+                            Some(err) => Err(err),
+                            None => Ok(()),
+                        },
+                    })
+                    .collect::<Vec<syn::Result<_>>>()
+                    .join_errors()
+                {
+                    Some(err) => Err(err),
+                    None => Ok(()),
+                }
+            })
+            .collect::<Vec<syn::Result<_>>>()
+            .join_errors()
+        {
+            return Err(err);
+        };
 
         Ok(protocol)
     }
@@ -264,7 +326,7 @@ impl Package {
 }
 
 impl Service {
-    fn try_parse(input: ParseStream, proto2: bool) -> syn::Result<Option<Self>> {
+    fn try_parse(input: ParseStream, proto_version: usize) -> syn::Result<Option<Self>> {
         if let Some(_) = input.try_parse_as_ident("service", false) {
             let name = input.parse_as_ident()?;
             let inner: ParseBuffer;
@@ -277,10 +339,10 @@ impl Service {
                     continue;
                 }
                 if let Some(_) = inner.try_parse_as_ident("rpc", false) {
-                    methods.push(Method::continue_to_parse(&inner, false)?);
+                    methods.push(Method::continue_to_parse(&inner, proto_version)?);
                 } else if let Some(stream) = inner.try_parse_as_ident("stream", false) {
-                    if proto2 {
-                        let mut method = Method::continue_to_parse(&inner, true)?;
+                    if proto_version == 2 {
+                        let mut method = Method::continue_to_parse(&inner, proto_version)?;
                         method.client_streaming = Some(stream.span());
                         method.server_streaming = Some(stream.span());
                         methods.push(method);
@@ -304,34 +366,111 @@ impl Service {
 }
 
 impl Method {
-    fn continue_to_parse(input: ParseStream, proto2_stream: bool) -> syn::Result<Self> {
-        let name = input.parse_as_ident()?;
-        let (client_streaming, input_type) = {
-            let inner: ParseBuffer;
-            syn::parenthesized!(inner in input);
-            let client_stream = if !proto2_stream {
-                inner.try_parse_as_ident("stream", false)
+    fn parse_param(
+        input: ParseStream,
+        rpc_name: &Ident,
+        proto_version: usize,
+        suffix: &'static str,
+    ) -> syn::Result<(Option<Span>, ProtobufPath, Option<Message>)> {
+        let inner: ParseBuffer;
+        syn::parenthesized!(inner in input);
+        let stream = if proto_version != 2 {
+            inner.try_parse_as_ident("stream", false)
+        } else {
+            None
+        };
+        let (message, param_type) = if cfg!(feature = "simplize_rpc_params") {
+            if inner.is_empty() {
+                (None, ProtobufPath::new_empty(rpc_name.span()))
+            } else if inner.peek(token::Brace) {
+                let MessageBody {
+                    fields,
+                    options,
+                    reserved_names,
+                    reserved_nums,
+                    extension_ranges,
+                    extensions,
+                    messages,
+                    enums,
+                    nested_types,
+                    ..
+                } = MessageBody::parse(
+                    &inner,
+                    proto_version,
+                    MessageBodyParseMode::parse_message(proto_version),
+                    None,
+                )?;
+                let message_name = rpc_name
+                    .to_ident_with_case(Case::UpperCamel)
+                    .with_suffix(suffix);
+                let message = Message {
+                    nested_mod_name: None,
+                    struct_name: message_name.clone(),
+                    name: message_name.clone(),
+                    fields,
+                    options,
+                    reserved_names,
+                    reserved_nums,
+                    extension_ranges,
+                    extensions,
+                    messages,
+                    enums,
+                    nested_types,
+                };
+                (Some(message), ProtobufPath::from_ident(message_name))
+            } else if inner.peek(Ident) && inner.peek2(token::Brace) {
+                let message_name: Ident = inner.parse()?;
+                let MessageBody {
+                    fields,
+                    options,
+                    reserved_names,
+                    reserved_nums,
+                    extension_ranges,
+                    extensions,
+                    messages,
+                    enums,
+                    nested_types,
+                    ..
+                } = MessageBody::parse(
+                    &inner,
+                    proto_version,
+                    MessageBodyParseMode::parse_message(proto_version),
+                    None,
+                )?;
+                let message = Message {
+                    nested_mod_name: None,
+                    struct_name: message_name.clone(),
+                    name: message_name.clone(),
+                    fields,
+                    options,
+                    reserved_names,
+                    reserved_nums,
+                    extension_ranges,
+                    extensions,
+                    messages,
+                    enums,
+                    nested_types,
+                };
+                (Some(message), ProtobufPath::from_ident(message_name))
             } else {
-                None
-            };
-            let input_type: ProtobufPath = inner.parse()?;
-            if !inner.is_empty() {
-                inner.span().to_syn_error("expect ')'").to_err()?;
+                (None, inner.parse()?)
             }
-            (client_stream.map(|i| i.span()), input_type)
+        } else {
+            (None, inner.parse()?)
         };
+        if !inner.is_empty() {
+            inner.span().to_syn_error("expect ')'").to_err()?;
+        }
+        Ok((stream.map(|i| i.span()), param_type, message))
+    }
+
+    fn continue_to_parse(input: ParseStream, proto_version: usize) -> syn::Result<Self> {
+        let name = input.parse_as_ident()?;
+        let (client_streaming, input_type, input_message) =
+            Self::parse_param(input, &name, proto_version, "Request")?;
         input.parse_as_named_ident("returns", false)?;
-        let (server_streaming, output_type) = {
-            let inner: ParseBuffer;
-            syn::parenthesized!(inner in input);
-            let server_stream = if !proto2_stream {
-                inner.try_parse_as_ident("stream", false)
-            } else {
-                None
-            };
-            let output_type: ProtobufPath = inner.parse()?;
-            (server_stream.map(|i| i.span()), output_type)
-        };
+        let (server_streaming, output_type, output_message) =
+            Self::parse_param(input, &name, proto_version, "Response")?;
 
         let options = input.parse::<TryAsOptions>()?.0;
 
@@ -339,8 +478,10 @@ impl Method {
             method_name: name.to_ident_with_case(Case::Snake),
             name,
             client_streaming,
+            input_message,
             input_type,
             server_streaming,
+            output_message,
             output_type,
             options,
         })
@@ -363,11 +504,15 @@ impl Parse for TryAsOptions {
 }
 
 impl Message {
-    fn try_parse(input: ParseStream, proto2: bool) -> syn::Result<Option<Self>> {
+    fn try_parse(
+        input: ParseStream,
+        proto_version: usize,
+        parent_name: Option<&Ident>,
+    ) -> syn::Result<Option<Self>> {
         if let Some(_) = input.try_parse_as_ident("message", false) {
             let name = input.parse_as_ident()?;
             let MessageBody {
-                fields,
+                mut fields,
                 reserved_nums,
                 reserved_names,
                 messages,
@@ -378,17 +523,47 @@ impl Message {
                 nested_types,
             } = MessageBody::parse(
                 input,
-                proto2,
-                if proto2 {
-                    MessageBodyParseMode::MessageProto2
-                } else {
-                    MessageBodyParseMode::MessageProto3
-                },
+                proto_version,
+                MessageBodyParseMode::parse_message(proto_version),
+                Some(&name),
             )?;
+
+            fields.iter_mut().for_each(|field| {
+                if let MessageElement::Field(field) = field {
+                    if let FieldType::MessageOrEnum(t) = &mut field.typ {
+                        if let ResolvedType::Unresolved = t.resolved_type {
+                            if let Some(inner_message) = messages
+                                .iter()
+                                .find(|m| m.name.eq(t.type_path.local_name()))
+                            {
+                                t.resolved_type = ResolvedType::Inner(InnerType {
+                                    message_name: name.clone(),
+                                    inner_mod_name: name.to_ident_with_case(Case::Snake),
+                                    inner_type_name: inner_message.name.clone(),
+                                    is_message: true,
+                                });
+                                return;
+                            }
+                            if let Some(inner_enum) =
+                                enums.iter().find(|e| e.name.eq(t.type_path.local_name()))
+                            {
+                                t.resolved_type = ResolvedType::Inner(InnerType {
+                                    message_name: name.clone(),
+                                    inner_mod_name: name.to_ident_with_case(Case::Snake),
+                                    inner_type_name: inner_enum.name.clone(),
+                                    is_message: false,
+                                });
+                                return;
+                            }
+                        }
+                    }
+                }
+            });
+
             Ok(Some(Self {
                 nested_types,
                 struct_name: name.to_ident_with_case(Case::UpperCamel),
-                nested_mod_name: name.to_ident_with_case(Case::Snake),
+                nested_mod_name: parent_name.map(|name| name.to_ident_with_case(Case::Snake)),
                 name,
                 fields,
                 reserved_nums,
@@ -415,6 +590,22 @@ enum MessageBodyParseMode {
 }
 
 impl MessageBodyParseMode {
+    fn parse_message(version: usize) -> Self {
+        if version == 2 {
+            Self::MessageProto2
+        } else {
+            Self::MessageProto3
+        }
+    }
+
+    fn parse_extension(version: usize) -> Self {
+        if version == 2 {
+            Self::ExtendProto2
+        } else {
+            Self::ExtendProto3
+        }
+    }
+
     fn to_str(&self) -> &'static str {
         match self {
             Self::MessageProto2 => "parsing message in proto2",
@@ -426,6 +617,7 @@ impl MessageBodyParseMode {
     }
 }
 
+#[allow(unused)]
 impl MessageBodyParseMode {
     fn label_allowed(&self, label: Modifier) -> bool {
         match label {
@@ -496,7 +688,7 @@ impl MessageBodyParseMode {
 
 #[derive(Default)]
 pub(crate) struct MessageBody {
-    pub fields: Vec<FieldOrOneOf>,
+    pub fields: Vec<MessageElement>,
     pub reserved_nums: Vec<RangeInclusive<i32>>,
     pub reserved_names: Vec<Ident>,
     pub messages: Vec<Message>,
@@ -531,7 +723,12 @@ fn parse_ranges(input: ParseStream) -> syn::Result<Vec<RangeInclusive<i32>>> {
 }
 
 impl MessageBody {
-    fn parse(input: ParseStream, proto2: bool, mode: MessageBodyParseMode) -> syn::Result<Self> {
+    fn parse(
+        input: ParseStream,
+        proto_version: usize,
+        mode: MessageBodyParseMode,
+        parent_name: Option<&Ident>,
+    ) -> syn::Result<Self> {
         let mut r = MessageBody::default();
         let inner: ParseBuffer;
         syn::braced!(inner in input);
@@ -546,22 +743,22 @@ impl MessageBody {
                     r.reserved_names.extend(field_names);
                     continue;
                 }
-                if let Some(oneof) = OneOf::try_parse(&inner, proto2)? {
+                if let Some(oneof) = OneOf::try_parse(&inner, proto_version, parent_name)? {
                     r.nested_types.push(NestedTypeIndex::Oneof(r.fields.len()));
-                    r.fields.push(FieldOrOneOf::OneOf(oneof));
+                    r.fields.push(MessageElement::OneOf(oneof));
                     continue;
                 }
-                if let Some(extensions) = Extension::try_parse(&inner, proto2)? {
+                if let Some(extensions) = Extension::try_parse(&inner, proto_version)? {
                     r.extensions.extend(extensions);
                     continue;
                 }
-                if let Some(nested) = Message::try_parse(&inner, proto2)? {
+                if let Some(nested) = Message::try_parse(&inner, proto_version, parent_name)? {
                     r.nested_types
                         .push(NestedTypeIndex::Message(r.messages.len()));
                     r.messages.push(nested);
                     continue;
                 }
-                if let Some(nested) = Enumeration::try_parse(&inner, proto2)? {
+                if let Some(nested) = Enumeration::try_parse(&inner, proto_version, parent_name)? {
                     r.nested_types.push(NestedTypeIndex::Enum(r.enums.len()));
                     r.enums.push(nested);
                     continue;
@@ -577,7 +774,7 @@ impl MessageBody {
             }
 
             if mode.is_extensions_allowed() {
-                if let Some(extensions) = Extension::try_parse(&inner, proto2)? {
+                if let Some(extensions) = Extension::try_parse(&inner, proto_version)? {
                     r.extensions.extend(extensions);
                     continue;
                 }
@@ -603,9 +800,15 @@ impl MessageBody {
                 }
             }
 
-            r.fields
-                .push(FieldOrOneOf::Field(Field::parse(&inner, proto2, mode)?));
+            r.fields.push(MessageElement::Field(Field::parse(
+                &inner,
+                proto_version,
+                mode,
+                parent_name,
+            )?));
         }
+
+        r.check_tags()?;
 
         Ok(r)
     }
@@ -629,6 +832,86 @@ impl MessageBody {
                 None
             },
         )
+    }
+
+    fn check_tags(&mut self) -> syn::Result<()> {
+        let mut tag_used = HashMap::<i32, Span>::new();
+        let mut ref_tag_span = None;
+        let mut next_tag = 1;
+
+        fn check_field(
+            field: &mut Field,
+            reserved_nums: &Vec<RangeInclusive<i32>>,
+            tag_used: &mut HashMap<i32, Span>,
+            next_tag: i32,
+            ref_tag_span: Option<Span>,
+        ) -> syn::Result<(i32, Option<Span>)> {
+            macro_rules! throw_if_reserved {
+                ($value:expr, $span:expr, $reserved_error:expr, $occupied_error:expr) => {
+                    for range in reserved_nums.iter() {
+                        if range.contains($value) {
+                            return Err(syn::Error::new($span, $reserved_error));
+                        }
+                    }
+                    if let Some(prev_span) = tag_used.get($value) {
+                        let span = if let Some(new_span) = ($span).join(*prev_span) {
+                            new_span
+                        } else {
+                            $span
+                        };
+                        return Err(syn::Error::new(span, $occupied_error));
+                    }
+                };
+                ($value:expr, $span:expr) => {
+                    throw_if_reserved!($value, $span, "this tag is reserved!", "The tag is used")
+                };
+            }
+            match &field.tag {
+                TagValue::Value(span, value) => {
+                    throw_if_reserved!(value, *span);
+                    tag_used.insert(*value, *span);
+                    Ok((*value + 1, Some(*span)))
+                }
+                TagValue::AutoIncr => {
+                    throw_if_reserved!(
+                        &next_tag,
+                        field.field_name.span(),
+                        &format!("tag number({}) is reserved", next_tag),
+                        &format!("tag number({}) is used", next_tag)
+                    );
+                    tag_used.insert(next_tag, field.field_name.span());
+                    field.tag =
+                        TagValue::Value(ref_tag_span.unwrap_or(field.field_name.span()), next_tag);
+                    Ok((next_tag + 1, ref_tag_span))
+                }
+            }
+        }
+
+        for field in self.fields.iter_mut() {
+            match field {
+                MessageElement::Field(field) => {
+                    (next_tag, ref_tag_span) = check_field(
+                        field,
+                        &self.reserved_nums,
+                        &mut tag_used,
+                        next_tag,
+                        ref_tag_span,
+                    )?;
+                }
+                MessageElement::OneOf(oneof) => {
+                    for field in oneof.fields.iter_mut() {
+                        (next_tag, ref_tag_span) = check_field(
+                            field,
+                            &self.reserved_nums,
+                            &mut tag_used,
+                            next_tag,
+                            ref_tag_span,
+                        )?;
+                    }
+                }
+            }
+        }
+        Ok(())
     }
 }
 
@@ -664,8 +947,33 @@ impl Modifier {
     }
 }
 
+impl TagValue {
+    fn parse(input: ParseStream, error_span: Span) -> syn::Result<Self> {
+        if input.peek(Token![=]) {
+            input.parse::<Token![=]>()?;
+            let value = input.parse::<LitInt>()?;
+            let span = value.span();
+            let value: i32 = value.base10_parse()?;
+            Ok(Self::Value(span, value))
+        } else {
+            if cfg!(not(feature = "tagless")) {
+                return Err(syn::Error::new(
+                    error_span,
+                    "missing tag number here, you can enable 'tagless' feature to omit the tag.",
+                ));
+            }
+            Ok(Self::AutoIncr)
+        }
+    }
+}
+
 impl Field {
-    fn parse(input: ParseStream, proto2: bool, mode: MessageBodyParseMode) -> syn::Result<Self> {
+    fn parse(
+        input: ParseStream,
+        proto_version: usize,
+        mode: MessageBodyParseMode,
+        parent_name: Option<&Ident>,
+    ) -> syn::Result<Self> {
         let rule = if input.peek_as_ident("map", false) {
             if !mode.map_allowed() {
                 let ident = input.parse_as_named_ident("map", false)?;
@@ -689,22 +997,18 @@ impl Field {
             {
                 name.to_syn_error("expect Upper case group name").to_err()?;
             }
-            input.parse::<Token![=]>()?;
-            let number = input.parse::<LitInt>()?;
+            let tag = TagValue::parse(input, name.span())?;
             let MessageBody { fields, .. } = MessageBody::parse(
                 input,
-                proto2,
-                if proto2 {
-                    MessageBodyParseMode::MessageProto2
-                } else {
-                    MessageBodyParseMode::MessageProto3
-                },
+                proto_version,
+                MessageBodyParseMode::parse_message(proto_version),
+                parent_name,
             )?;
             let fields = fields
                 .into_iter()
                 .map(|fo| match fo {
-                    FieldOrOneOf::Field(f) => Ok(f),
-                    FieldOrOneOf::OneOf(o) => o
+                    MessageElement::Field(f) => Ok(f),
+                    MessageElement::OneOf(o) => o
                         .name
                         .to_syn_error("unexpected 'oneof' in 'group'")
                         .to_err(),
@@ -718,14 +1022,13 @@ impl Field {
                 name: name.to_ident_with_case(Case::Lower),
                 modifier: rule,
                 typ: FieldType::Group(Group { name, fields }),
-                number,
+                tag,
                 options: Vec::new(),
             })
         } else {
-            let typ = input.parse()?;
+            let typ = FieldType::parse(input)?;
             let name = input.parse_as_ident()?;
-            input.parse::<Token![=]>()?;
-            let number = input.parse()?;
+            let tag = TagValue::parse(input, name.span())?;
             let mut options = vec![];
             if input.peek(token::Bracket) {
                 let inner: ParseBuffer;
@@ -739,9 +1042,27 @@ impl Field {
                 name,
                 modifier: rule,
                 typ,
-                number,
+                tag,
                 options,
             })
+        }
+    }
+
+    fn resolve_type(
+        &mut self,
+        inside_types: &HashMap<String, (bool, Span)>,
+        resolver: &mut TypeResolver,
+    ) -> syn::Result<()> {
+        if self.typ.is_unresolved() {
+            if self.typ.resolve_with_inside(inside_types) {
+                Ok(())
+            } else if self.typ.resolve_with_resolver(resolver)? {
+                Ok(())
+            } else {
+                Err(syn::Error::new(self.typ.span(), "no such type"))
+            }
+        } else {
+            Ok(())
         }
     }
 }
@@ -772,7 +1093,7 @@ impl Parse for FieldType {
                     unreachable!()
                 }
             })
-        } else if let Some(_) = input.try_parse_as_ident("map", false) {
+        } else if let Some(ident) = input.try_parse_as_ident("map", false) {
             input.parse::<Token![<]>()?;
 
             let key = FieldType::parse(input)?;
@@ -780,26 +1101,45 @@ impl Parse for FieldType {
             input.parse::<Token![,]>()?;
             let value = FieldType::parse(input)?;
 
-            input.parse::<Token![>]>()?;
-            Ok(Self::Map(Box::new((key, value))))
+            let a = input.parse::<Token![>]>()?;
+            let span = ident.span().join(a.span).unwrap_or(ident.span());
+            Ok(Self::Map(MapType {
+                span,
+                key: Box::new(key),
+                value: Box::new(value),
+            }))
         } else {
-            Ok(Self::MessageOrEnum(input.parse()?))
+            let type_path: ProtobufPath = input.parse()?;
+            Ok(Self::MessageOrEnum(TypeRef {
+                type_path,
+                // resolve later
+                resolved_type: ResolvedType::Unresolved,
+            }))
         }
     }
 }
 
 impl OneOf {
-    fn try_parse(input: ParseStream, proto2: bool) -> syn::Result<Option<Self>> {
+    fn try_parse(
+        input: ParseStream,
+        proto_version: usize,
+        parent_name: Option<&Ident>,
+    ) -> syn::Result<Option<Self>> {
         if let Some(_) = input.try_parse_as_ident("oneof", false) {
             let name = input.parse_as_ident()?;
             let MessageBody {
                 fields, options, ..
-            } = MessageBody::parse(input, proto2, MessageBodyParseMode::Oneof)?;
+            } = MessageBody::parse(
+                input,
+                proto_version,
+                MessageBodyParseMode::Oneof,
+                parent_name,
+            )?;
             let fields = fields
                 .into_iter()
                 .map(|fo| match fo {
-                    FieldOrOneOf::Field(f) => Ok(f),
-                    FieldOrOneOf::OneOf(o) => o.name.to_syn_error("oneof in oneof").to_err(),
+                    MessageElement::Field(f) => Ok(f),
+                    MessageElement::OneOf(o) => o.name.to_syn_error("oneof in oneof").to_err(),
                 })
                 .collect::<syn::Result<Vec<_>>>()?;
 
@@ -822,10 +1162,17 @@ impl OneOf {
                 span,
             );
 
+            let nested_mod_name = parent_name
+                .ok_or(syn::Error::new(name.span(), "missing parent message"))?
+                .to_ident_with_case(Case::Snake);
+
             Ok(Some(OneOf {
                 field_name: name.to_ident_with_case(Case::Snake),
                 enum_name: name.to_ident_with_case(Case::UpperCamel),
-                field_lit: name.to_lit_str(),
+                field_lit: name
+                    .to_lit_str()
+                    .with_prefix(format!("{}::", nested_mod_name.to_string())),
+                nested_mod_name,
                 tags,
                 name,
                 fields,
@@ -838,24 +1185,21 @@ impl OneOf {
 }
 
 impl Extension {
-    fn try_parse(input: ParseStream, proto2: bool) -> syn::Result<Option<Vec<Extension>>> {
+    fn try_parse(input: ParseStream, proto_version: usize) -> syn::Result<Option<Vec<Extension>>> {
         if let Some(_) = input.try_parse_as_ident("extend", false) {
             let extendee: ProtobufPath = input.parse()?;
             let MessageBody { fields, .. } = MessageBody::parse(
                 input,
-                proto2,
-                if proto2 {
-                    MessageBodyParseMode::ExtendProto2
-                } else {
-                    MessageBodyParseMode::ExtendProto3
-                },
+                proto_version,
+                MessageBodyParseMode::parse_extension(proto_version),
+                None,
             )?;
 
             let fields: Vec<Field> = fields
                 .into_iter()
                 .map(|fo| match fo {
-                    FieldOrOneOf::Field(f) => Ok(f),
-                    FieldOrOneOf::OneOf(o) => o.name.to_syn_error("oneof in extend").to_err(),
+                    MessageElement::Field(f) => Ok(f),
+                    MessageElement::OneOf(o) => o.name.to_syn_error("oneof in extend").to_err(),
                 })
                 .collect::<syn::Result<_>>()?;
 
@@ -875,7 +1219,11 @@ impl Extension {
 }
 
 impl Enumeration {
-    fn try_parse(input: ParseStream, _proto2: bool) -> syn::Result<Option<Self>> {
+    fn try_parse(
+        input: ParseStream,
+        _proto_version: usize,
+        parent_name: Option<&Ident>,
+    ) -> syn::Result<Option<Self>> {
         if let Some(_) = input.try_parse_as_ident("enum", false) {
             let name = input.parse_as_ident()?;
             let mut values = Vec::new();
@@ -903,6 +1251,7 @@ impl Enumeration {
             }
 
             Ok(Some(Self {
+                nested_mod_name: parent_name.map(|name| name.to_ident_with_case(Case::Snake)),
                 name,
                 values,
                 options,
@@ -918,8 +1267,12 @@ impl Enumeration {
 impl Parse for EnumValue {
     fn parse(input: ParseStream) -> syn::Result<Self> {
         let name = input.parse_as_ident()?;
-        input.parse::<Token![=]>()?;
-        let value = input.parse::<LitInt>()?;
+        let tag = if input.peek(Token![=]) {
+            input.parse::<Token![=]>()?;
+            Some(input.parse::<LitInt>()?)
+        } else {
+            None
+        };
         let options = if input.peek(token::Bracket) {
             let inner: ParseBuffer;
             syn::bracketed!(inner in input);
@@ -931,7 +1284,7 @@ impl Parse for EnumValue {
             proto_name: name.to_lit_str(),
             variant_name: name.to_ident_with_case(Case::UpperCamel),
             name,
-            number: value,
+            tag,
             options,
         })
     }

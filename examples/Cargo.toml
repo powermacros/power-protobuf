@@ -8,7 +8,7 @@ version = "0.1.0"
 
 [[bin]]
 name = "helloworld-server"
-path = "src/hellowworld/server.rs"
+path = "src/helloworld/server.rs"
 
 [[bin]]
 name = "helloworld-client"
@@ -20,3 +20,4 @@ power-protobuf = { path = ".." }
 tonic = { version = "*" }
 prost = { version = "*" }
 prost-types = { version = "*" }
+serde = { version = "1", features = ["derive"] }
