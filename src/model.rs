@@ -71,7 +71,14 @@ impl ProtobufPath {
         }
     }
     pub fn is_local(&self) -> bool {
-        self.segments.len() == 1
+        if self.segments.len() == 1 {
+            return true;
+        }
+        if let Some(first) = self.segments.first() {
+            first.eq("self")
+        } else {
+            false
+        }
     }
     pub fn is_relative(&self) -> bool {
         if let Some(first) = self.segments.first() {
@@ -507,6 +514,7 @@ pub struct ProtobufConstantMessage {
 }
 
 #[derive(Debug, Clone)]
+#[allow(unused)]
 pub enum ProtobufConstant {
     U64(LitInt, bool),
     F64(LitFloat, bool), // TODO: eq

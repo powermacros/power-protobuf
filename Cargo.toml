@@ -3,6 +3,9 @@ name = "power-protobuf"
 version = "0.1.0"
 edition = "2021"
 
+[[example]]
+name = "helloworld"
+
 [lib]
 name = "power_porotbuf"
 path = "src/lib.rs"
@@ -16,6 +19,15 @@ convert_case = "0.6"
 syn-prelude = { git = "https://github.com/powermacros/syn-prelude.git", rev = "55ef6c1" }
 indexmap = { version = "2.0" }
 nom = "7"
+
+[dev-dependencies]
+tokio = { version = "1.0", features = ["rt-multi-thread", "macros"] }
+power-protobuf = { path = "." }
+tonic = { version = "*" }
+prost = { version = "*" }
+prost-types = { version = "*" }
+serde = { version = "1", features = ["derive"] }
+http = { version = "*" }
 
 [features]
 default = ["impl_prost", "tagless", "simplize_rpc_params", "derive_serde"]

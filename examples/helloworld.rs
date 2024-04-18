@@ -1,13 +1,8 @@
 use std::time::Duration;
-
-use example::{greeter_server::GreeterServer, HelloReply, SayHelloRequest};
+use example::{greeter_server::{Greeter,GreeterServer}, HelloReply, SayHelloRequest, greeter_client::GreeterClient};
 use power_porotbuf::protobuf;
 use tokio::{spawn, time::sleep};
 use tonic::{transport::Server, Request, Response, Status};
-
-use crate::example::greeter_client::GreeterClient;
-
-use self::example::greeter_server::Greeter;
 
 protobuf! {
     syntax = "proto3";
@@ -55,7 +50,7 @@ impl Greeter for MyGreeter {
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     spawn(async {
-        let _ = run_server().await;
+        run_server().await.unwrap();
     });
     run_client().await
 }
@@ -82,6 +77,6 @@ async fn run_client() -> Result<(), Box<dyn std::error::Error>> {
 
     let response = client.say_hello(request).await?;
 
-    println!("RESPONSE: {:?}", response);
+    println!("Got a response: {:?}", response);
     Ok(())
 }
