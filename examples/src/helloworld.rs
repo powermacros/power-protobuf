@@ -1,16 +1,18 @@
 use std::time::Duration;
 
-use greeter_server::GreeterServer;
+use example::{greeter_server::GreeterServer, HelloReply, SayHelloRequest};
 use power_porotbuf::protobuf;
 use tokio::{spawn, time::sleep};
 use tonic::{transport::Server, Request, Response, Status};
 
-use crate::greeter_client::GreeterClient;
+use crate::example::greeter_client::GreeterClient;
 
-use self::greeter_server::Greeter;
+use self::example::greeter_server::Greeter;
 
 protobuf! {
     syntax = "proto3";
+
+    package example;
 
     option java_multiple_files = true;
     option java_package = "io.grpc.examples.helloworld";

@@ -204,7 +204,6 @@ impl TypeResolver {
 
             if p.exists() {
                 let mut segments = if let Ok(rel) = p.strip_prefix(&self.src_dir) {
-                    let i = rel.iter();
                     rel.iter()
                         .filter_map(|s| {
                             let s = s.to_string_lossy();
@@ -564,31 +563,20 @@ mod fast_pb_parser {
             map(many0(pb_rpc), |messages| {
                 messages
                     .into_iter()
-                    .map(|rpc| {
-                        if rpc.gen_request && rpc.gen_response {
-                            vec![
-                                Message {
-                                    name: rpc.name,
-                                    suffix: "Request",
-                                },
-                                Message {
-                                    name: rpc.name,
-                                    suffix: "Response",
-                                },
-                            ]
-                        } else if rpc.gen_request {
-                            vec![Message {
-                                name: rpc.name,
-                                suffix: "Request",
-                            }]
-                        } else if rpc.gen_response {
-                            vec![Message {
-                                name: rpc.name,
-                                suffix: "Response",
-                            }]
-                        } else {
-                            vec![]
-                        }
+                    .map(|rpc| match (rpc.gen_request, rpc.gen_response) {
+                        (None, None) => vec![],
+                        (None, Some((name, suffix))) => vec![Message { name, suffix }],
+                        (Some((name, suffix)), None) => vec![Message { name, suffix }],
+                        (Some(r), Some(p)) => vec![
+                            Message {
+                                name: r.0,
+                                suffix: r.1,
+                            },
+                            Message {
+                                name: p.0,
+                                suffix: p.1,
+                            },
+                        ],
                     })
                     .flatten()
                     .collect()
@@ -598,9 +586,8 @@ mod fast_pb_parser {
     }
 
     struct Rpc<'a> {
-        name: &'a str,
-        gen_request: bool,
-        gen_response: bool,
+        gen_request: Option<(&'a str, &'static str)>,
+        gen_response: Option<(&'a str, &'static str)>,
     }
 
     fn pb_rpc(input: &str) -> IResult<&str, Rpc> {
@@ -610,7 +597,11 @@ mod fast_pb_parser {
             tag_ws_around!("("),
             preceded(
                 opt(tag_ws_around!("stream")),
-                alt((map(pb_message_body, |_| true), map(ident, |_| false))),
+                alt((
+                    map(pb_message_body, |_| Some((rpc_name, "Request"))),
+                    map(terminated(ident, pb_message_body), |name| Some((name, ""))),
+                    map(ident, |_| None),
+                )),
             ),
             tag_ws_around!(")"),
         )(rest)?;
@@ -619,7 +610,11 @@ mod fast_pb_parser {
             tag_ws_around!("("),
             preceded(
                 opt(tag_ws_around!("stream")),
-                alt((map(pb_message_body, |_| true), map(ident, |_| false))),
+                alt((
+                    map(pb_message_body, |_| Some((rpc_name, "Response"))),
+                    map(terminated(ident, pb_message_body), |name| Some((name, ""))),
+                    map(ident, |_| None),
+                )),
             ),
             tag_ws_around!(")"),
         )(rest)?;
@@ -633,7 +628,6 @@ mod fast_pb_parser {
         Ok((
             rest,
             Rpc {
-                name: rpc_name,
                 gen_request,
                 gen_response,
             },

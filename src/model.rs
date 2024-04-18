@@ -112,16 +112,6 @@ pub enum Modifier {
     Required,
 }
 
-impl Modifier {
-    pub const fn as_str(&self) -> &'static str {
-        match self {
-            Modifier::Optional => "optional",
-            Modifier::Repeated => "repeated",
-            Modifier::Required => "required",
-        }
-    }
-}
-
 /// Protobuf group
 #[derive(Debug, Clone)]
 pub struct Group {
@@ -342,16 +332,6 @@ pub enum TagValue {
     AutoIncr,
 }
 
-impl TagValue {
-    pub fn number(&self) -> i32 {
-        if let Self::Value(_, value) = self {
-            *value
-        } else {
-            -1
-        }
-    }
-}
-
 impl ToLitStr for TagValue {
     fn to_lit_str(&self) -> LitStr {
         if let Self::Value(span, value) = self {
@@ -416,56 +396,6 @@ pub struct Message {
     /// Extensions
     pub extensions: Vec<Extension>,
     pub nested_types: Vec<NestedTypeIndex>,
-}
-
-impl Message {
-    pub fn regular_fields_including_in_oneofs(&self) -> Vec<&Field> {
-        self.fields
-            .iter()
-            .flat_map(|fo| match &fo {
-                MessageElement::Field(f) => vec![f],
-                MessageElement::OneOf(o) => o.fields.iter().collect(),
-            })
-            .collect()
-    }
-
-    /** Find a field by name. */
-    pub fn field_by_name(&self, name: &str) -> Option<&Field> {
-        self.regular_fields_including_in_oneofs()
-            .into_iter()
-            .find(|f| f.name.eq(name))
-    }
-
-    pub fn _nested_extensions(&self) -> Vec<&Group> {
-        self.regular_fields_including_in_oneofs()
-            .into_iter()
-            .flat_map(|f| match &f.typ {
-                FieldType::Group(g) => Some(g),
-                _ => None,
-            })
-            .collect()
-    }
-
-    #[cfg(test)]
-    pub fn regular_fields_for_test(&self) -> Vec<&Field> {
-        self.fields
-            .iter()
-            .flat_map(|fo| match &fo {
-                MessageElement::Field(f) => Some(f),
-                MessageElement::OneOf(_) => None,
-            })
-            .collect()
-    }
-
-    pub fn oneofs(&self) -> Vec<&OneOf> {
-        self.fields
-            .iter()
-            .flat_map(|fo| match &fo {
-                MessageElement::Field(_) => None,
-                MessageElement::OneOf(o) => Some(o),
-            })
-            .collect()
-    }
 }
 
 /// A protobuf enumeration field
@@ -564,12 +494,6 @@ pub struct AnyTypeUrl {
     pub full_type_name: ProtobufPath,
 }
 
-impl fmt::Display for AnyTypeUrl {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "{}/{}", self.prefix, self.full_type_name)
-    }
-}
-
 #[derive(Debug, Clone, Hash, PartialEq, Eq)]
 pub enum ProtobufConstantMessageFieldName {
     Regular(Ident),
@@ -577,23 +501,11 @@ pub enum ProtobufConstantMessageFieldName {
     AnyTypeUrl(AnyTypeUrl),
 }
 
-impl fmt::Display for ProtobufConstantMessageFieldName {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            ProtobufConstantMessageFieldName::Regular(s) => write!(f, "{}", s),
-            ProtobufConstantMessageFieldName::Extension(p) => write!(f, "[{}]", p),
-            ProtobufConstantMessageFieldName::AnyTypeUrl(a) => write!(f, "[{}]", a),
-        }
-    }
-}
-
 #[derive(Debug, Clone)]
 pub struct ProtobufConstantMessage {
     pub fields: IndexMap<ProtobufConstantMessageFieldName, ProtobufConstant>,
 }
 
-/// constant = fullIdent | ( [ "-" | "+" ] intLit ) | ( [ "-" | "+" ] floatLit ) |
-//                 strLit | boolLit
 #[derive(Debug, Clone)]
 pub enum ProtobufConstant {
     U64(LitInt, bool),
@@ -604,110 +516,11 @@ pub enum ProtobufConstant {
     Message(ProtobufConstantMessage),
 }
 
-impl fmt::Display for ProtobufConstant {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            ProtobufConstant::U64(v, s) => {
-                if *s {
-                    f.write_char('-')?;
-                }
-                f.write_str(v.base10_digits())
-            }
-            ProtobufConstant::F64(v, s) => {
-                if *s {
-                    f.write_char('-')?;
-                }
-                f.write_str(v.base10_digits())
-            }
-            ProtobufConstant::Bool(v) => write!(f, "{}", v.value()),
-            ProtobufConstant::Ident(v) => write!(f, "{}", v),
-            ProtobufConstant::String(v) => write!(f, "{}", v.value()),
-            // TODO: text format explicitly
-            ProtobufConstant::Message(v) => write!(f, "{:?}", v),
-        }
-    }
-}
-
-impl ProtobufConstantMessage {
-    pub fn format(&self) -> String {
-        let mut s = String::new();
-        write!(s, "{{").unwrap();
-        for (n, v) in &self.fields {
-            match v {
-                ProtobufConstant::Message(m) => write!(s, "{} {}", n, m.format()).unwrap(),
-                v => write!(s, "{}: {}", n, v.format()).unwrap(),
-            }
-        }
-        write!(s, "}}").unwrap();
-        s
-    }
-}
-
-impl ProtobufConstant {
-    pub fn format(&self) -> String {
-        match self {
-            ProtobufConstant::U64(u, n) => {
-                if *n {
-                    format!("-{}", u.base10_digits())
-                } else {
-                    u.base10_digits().to_owned()
-                }
-            }
-            ProtobufConstant::F64(f, n) => {
-                if *n {
-                    format!("-{}", f.base10_digits())
-                } else {
-                    f.base10_digits().to_owned()
-                }
-            }
-            ProtobufConstant::Bool(b) => {
-                if b.value() {
-                    "true".to_owned()
-                } else {
-                    "false".to_owned()
-                }
-            }
-            ProtobufConstant::Ident(ref i) => format!("{}", i),
-            ProtobufConstant::String(ref s) => s.value(),
-            ProtobufConstant::Message(ref s) => s.format(),
-        }
-    }
-
-    // /** Interpret .proto constant as an reflection value. */
-    // pub fn as_type(&self, ty: RuntimeType) -> syn::Result<ReflectValueBox> {
-    //     match (self, &ty) {
-    //         (ProtobufConstant::Ident(ident), RuntimeType::Enum(e)) => {
-    //             if let Some(v) = e.value_by_name(&ident.to_string()) {
-    //                 return Ok(ReflectValueBox::Enum(e.clone(), v.value()));
-    //             }
-    //         }
-    //         (ProtobufConstant::Bool(b), RuntimeType::Bool) => {
-    //             return Ok(ReflectValueBox::Bool(b.value()))
-    //         }
-    //         (ProtobufConstant::String(lit), RuntimeType::String) => {
-    //             return Ok(ReflectValueBox::String(lit.value()))
-    //         }
-    //         _ => {}
-    //     }
-    //     todo!("not impl")
-    //     // Err(syn::Error::new(self., message))
-    // }
-}
-
 /// Equivalent of `UninterpretedOption.NamePart`.
 #[derive(Debug, Clone)]
 pub enum ProtobufOptionNamePart {
     Direct(Ident),
     Ext(ProtobufPath),
-}
-
-impl fmt::Display for ProtobufOptionNamePart {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            ProtobufOptionNamePart::Direct(n) => write!(f, "{}", n),
-            ProtobufOptionNamePart::Ext(n) => write!(f, "({})", n),
-        }
-    }
 }
 
 #[derive(Debug, Clone)]
@@ -717,27 +530,6 @@ pub struct ProtobufOptionNameExt(pub Vec<ProtobufOptionNamePart>);
 pub enum ProtobufOptionName {
     Builtin(Ident),
     Ext(ProtobufOptionNameExt),
-}
-
-impl fmt::Display for ProtobufOptionNameExt {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        for (index, comp) in self.0.iter().enumerate() {
-            if index != 0 {
-                write!(f, ".")?;
-            }
-            write!(f, "{}", comp)?;
-        }
-        Ok(())
-    }
-}
-
-impl fmt::Display for ProtobufOptionName {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            ProtobufOptionName::Builtin(n) => write!(f, "{}", n),
-            ProtobufOptionName::Ext(n) => write!(f, "{}", n),
-        }
-    }
 }
 
 impl ProtobufOptionName {
@@ -754,7 +546,7 @@ impl ProtobufOptionName {
                                     return false;
                                 }
                             }
-                            ProtobufOptionNamePart::Ext(ext) => return false,
+                            ProtobufOptionNamePart::Ext(_ext) => return false,
                         }
                     } else {
                         return false;

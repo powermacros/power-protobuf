@@ -26,9 +26,18 @@ impl ToTokens for Protocol {
                 }
             })
             .collect::<Vec<_>>();
-        tokens.append_all(quote! {
-            #(#decls)*
-        })
+        if let Some(Package { package }) = &self.package {
+            let package = package.to_ident_with_case(Case::Snake);
+            tokens.append_all(quote! {
+                pub mod #package {
+                    #(#decls)*
+                }
+            })
+        } else {
+            tokens.append_all(quote! {
+                #(#decls)*
+            })
+        }
     }
 }
 
@@ -58,7 +67,7 @@ impl Message {
                 quote! {
                     #deprecated
                     #[prost(oneof=#field_lit, tags=#tags)]
-                    #field_name: #nested_mod_name::#type_name
+                    pub #field_name: #nested_mod_name::#type_name
                 }
             }
         });
@@ -134,7 +143,7 @@ impl Field {
                 }
                 Modifier::Repeated => {
                     repeated = true;
-                    quote!(Vec<#field_type>)
+                    quote!(::prost::alloc::vec::Vec<#field_type>)
                 }
                 Modifier::Required => field_type,
             }
@@ -156,7 +165,7 @@ impl Field {
         quote! {
             #deprecated
             #[prost(#(#prost_args),*)]
-            #field_name: #field_type
+            pub #field_name: #field_type
         }
     }
 }
