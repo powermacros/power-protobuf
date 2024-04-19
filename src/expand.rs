@@ -43,8 +43,8 @@ impl ToTokens for Protocol {
 impl Message {
     fn to_tokens(&self) -> TokenStream {
         let Self {
+            name,
             struct_name,
-            nested_mod_name,
             messages,
             enums,
             fields,
@@ -63,10 +63,11 @@ impl Message {
                 ..
             }) => {
                 let deprecated = options.deprecated();
+                let nested_mod_name = name.to_ident_with_case(Case::Snake);
                 quote! {
                     #deprecated
                     #[prost(oneof=#field_lit, tags=#tags)]
-                    pub #field_name: #nested_mod_name::#type_name
+                    pub #field_name: Option<#nested_mod_name::#type_name>
                 }
             }
         });
@@ -91,6 +92,7 @@ impl Message {
                 })
                 .collect::<Vec<_>>();
 
+            let nested_mod_name = name.to_ident_with_case(Case::Snake);
             Some(quote! {
                 pub mod #nested_mod_name {
                     #(#nested)*
@@ -122,7 +124,6 @@ impl Field {
     fn to_tokens(&self) -> TokenStream {
         let Field {
             field_name,
-            modifier,
             typ,
             tag: number,
             options,
@@ -131,31 +132,10 @@ impl Field {
         let deprecated = options.deprecated();
         let tag = number.to_lit_str();
 
-        let field_type = typ.to_tokens(Some(options));
-        let mut optional = false;
-        let mut repeated = false;
-        let field_type = if let Some(modifier) = modifier {
-            match modifier {
-                Modifier::Optional => {
-                    optional = true;
-                    quote!(Option<#field_type>)
-                }
-                Modifier::Repeated => {
-                    repeated = true;
-                    quote!(::prost::alloc::vec::Vec<#field_type>)
-                }
-                Modifier::Required => field_type,
-            }
-        } else {
-            if typ.is_message_or_enum() {
-                quote!(Option<#field_type>)
-            } else {
-                field_type
-            }
-        };
+        let (optional, repeated, field_type) = self.to_type_tokens(0);
 
         let mut prost_args = vec![];
-        if let Some(ty) = typ.to_tag() {
+        if let Some(ty) = typ.to_prost_type() {
             prost_args.push(ty);
         }
         if optional {
@@ -170,6 +150,37 @@ impl Field {
             #[prost(#(#prost_args),*)]
             pub #field_name: #field_type
         }
+    }
+
+    fn to_type_tokens(&self, depth: usize) -> (bool, bool, TokenStream) {
+        let Field {
+            modifier,
+            typ,
+            options,
+            enum_field,
+            ..
+        } = self;
+        let field_type = typ.to_tokens(depth, Some(options));
+        let mut optional = false;
+        let mut repeated = false;
+        let typ = if let Some(modifier) = modifier {
+            match modifier {
+                Modifier::Optional => {
+                    optional = true;
+                    quote!(Option<#field_type>)
+                }
+                Modifier::Repeated => {
+                    repeated = true;
+                    quote!(::prost::alloc::vec::Vec<#field_type>)
+                }
+                Modifier::Required => field_type,
+            }
+        } else if !enum_field && typ.is_message_or_enum() {
+            quote!(Option<#field_type>)
+        } else {
+            field_type
+        };
+        (optional, repeated, typ)
     }
 }
 
@@ -697,9 +708,19 @@ impl OneOf {
         let Self {
             enum_name, fields, ..
         } = self;
-        let field_tokens = fields.iter().map(Field::to_tokens).collect::<Vec<_>>();
+        let field_tokens = fields.iter().map(|field| {
+            let Field { name, typ, tag, .. } = field;
+            let prost_type = typ.to_prost_type();
+            let (_, _, typ) = field.to_type_tokens(1);
+            let name = name.to_ident_with_case(Case::UpperCamel);
+            let tag = tag.to_lit_str();
+            quote! {
+                #[prost(#prost_type, tag = #tag)]
+                #name(#typ)
+            }
+        });
 
-        let mut derives = vec![quote!(Clone), quote!(PartialEq), quote!(prost::OneOf)];
+        let mut derives = vec![quote!(Clone), quote!(PartialEq), quote!(prost::Oneof)];
         if cfg!(feature = "derive_serde") {
             derives.push(quote!(serde::Deserialize));
             derives.push(quote!(serde::Serialize));
@@ -723,7 +744,7 @@ impl ToTokens for ProtobufPath {
 }
 
 impl FieldType {
-    fn to_tokens(&self, options: Option<&Vec<ProtobufOption>>) -> TokenStream {
+    fn to_tokens(&self, depth: usize, options: Option<&Vec<ProtobufOption>>) -> TokenStream {
         match self {
             FieldType::Int32(span) => Ident::new("i32", *span).to_token_stream(),
             FieldType::Int64(span) => Ident::new("i64", *span).to_token_stream(),
@@ -754,12 +775,32 @@ impl FieldType {
                             let idents = ty.type_path.segments.iter().skip(1);
                             quote!(#(#idents)::*)
                         } else {
-                            let idents = ty.type_path.segments.iter();
+                            let mut idents = ty
+                                .type_path
+                                .segments
+                                .iter()
+                                .map(|c| c.clone())
+                                .collect::<Vec<_>>();
+                            if depth > 0 {
+                                if depth == 1 {
+                                    idents.insert(0, ("super", ty.type_path.span()).to_ident());
+                                } else {
+                                    // FIXME: calculate absolute mod path
+                                }
+                            }
                             quote!(#(#idents)::*)
                         }
                     }
                     ResolvedType::ProtocolInside(ProtocolInsideType { name, .. }) => {
-                        name.to_token_stream()
+                        if depth > 0 {
+                            if depth == 1 {
+                                quote!(super::#name)
+                            } else {
+                                todo!("implement")
+                            }
+                        } else {
+                            name.to_token_stream()
+                        }
                     }
                     ResolvedType::Inner(InnerType {
                         inner_mod_name,
@@ -803,8 +844,8 @@ impl FieldType {
                 }
             }
             FieldType::Map(map) => {
-                let key_type = map.key.as_ref().to_tokens(None);
-                let value_type = map.value.as_ref().to_tokens(None);
+                let key_type = map.key.as_ref().to_tokens(depth, None);
+                let value_type = map.value.as_ref().to_tokens(depth, None);
 
                 let opt = options
                     .map(|opts| opts.iter().find(|opt| opt.name.is_option("map_type")))
@@ -832,7 +873,7 @@ impl FieldType {
         }
     }
 
-    fn to_tag(&self) -> Option<TokenStream> {
+    fn to_prost_type(&self) -> Option<TokenStream> {
         Some(match self {
             Self::Int32(span) => ("int32", *span).to_ident().to_token_stream(),
             Self::Int64(span) => ("int64", *span).to_ident().to_token_stream(),

@@ -9,8 +9,8 @@ use syn::{
     token, Ident, LitBool, LitInt, LitStr, Token,
 };
 use syn_prelude::{
-    JoinSynErrors, ParseAsIdent, ToErr, ToIdent, ToIdentWithCase, ToLitStr, ToSynError,
-    TryParseAsIdent, TryParseOneOfIdents, WithPrefix, WithSuffix,
+    AmmendSynError, JoinSynErrors, ParseAsIdent, ToErr, ToIdent, ToIdentWithCase, ToLitStr,
+    ToSynError, TryParseAsIdent, TryParseOneOfIdents, WithPrefix, WithSuffix,
 };
 
 use crate::{
@@ -47,12 +47,16 @@ impl Parse for Protocol {
                 input.parse::<Token![;]>()?;
                 continue;
             }
-            if let Some(message) = Message::try_parse(input, proto_version, None)? {
+            if let Some(message) = Message::try_parse(input, proto_version, None)
+                .add_error_suffix("while parsing message")?
+            {
                 protocol
                     .decls
                     .push(DeclIndex::Message(protocol.messages.len()));
                 protocol.messages.push(message);
-            } else if let Some(service) = Service::try_parse(input, proto_version)? {
+            } else if let Some(service) = Service::try_parse(input, proto_version)
+                .add_error_suffix("while parsing service")?
+            {
                 protocol
                     .decls
                     .push(DeclIndex::Service(protocol.services.len()));
@@ -76,16 +80,26 @@ impl Parse for Protocol {
                         .push(DeclIndex::Message(protocol.messages.len()));
                     protocol.messages.push(message);
                 }
-            } else if let Some(enumeration) = Enumeration::try_parse(input, proto_version, None)? {
+            } else if let Some(enumeration) = Enumeration::try_parse(input, proto_version, None)
+                .add_error_suffix("while parsing enumeration")?
+            {
                 protocol.decls.push(DeclIndex::Enum(protocol.enums.len()));
                 protocol.enums.push(enumeration);
-            } else if let Some(import) = Import::try_parse(input)? {
+            } else if let Some(import) =
+                Import::try_parse(input).add_error_suffix("while parsing import clause")?
+            {
                 protocol.imports.push(import);
-            } else if let Some(option) = ProtobufOption::try_parse(input)? {
+            } else if let Some(option) =
+                ProtobufOption::try_parse(input).add_error_prefix("while parsing global option")?
+            {
                 protocol.options.push(option);
-            } else if let Some(package) = Package::try_parse(input)? {
+            } else if let Some(package) =
+                Package::try_parse(input).add_error_suffix("while parsing 'package'")?
+            {
                 protocol.package = Some(package);
-            } else if let Some(ext) = Extension::try_parse(input, proto_version)? {
+            } else if let Some(ext) = Extension::try_parse(input, proto_version)
+                .add_error_suffix("while parsing protobuf syntax version")?
+            {
                 protocol.extensions.extend(ext);
             } else {
                 input.span().to_syn_error("unexpected token").to_err()?;
@@ -440,6 +454,7 @@ impl Method {
                     proto_version,
                     MessageBodyParseMode::parse_message(proto_version),
                     None,
+                    false,
                 )?;
                 let message_name = rpc_name
                     .to_ident_with_case(Case::UpperCamel)
@@ -477,6 +492,7 @@ impl Method {
                     proto_version,
                     MessageBodyParseMode::parse_message(proto_version),
                     None,
+                    false,
                 )?;
                 let message = Message {
                     nested_mod_name: None,
@@ -640,6 +656,7 @@ impl Message {
                 proto_version,
                 MessageBodyParseMode::parse_message(proto_version),
                 Some(&name),
+                false,
             )?;
 
             fields.iter_mut().for_each(|field| {
@@ -842,6 +859,7 @@ impl MessageBody {
         proto_version: usize,
         mode: MessageBodyParseMode,
         parent_name: Option<&Ident>,
+        enum_flag: bool,
     ) -> syn::Result<Self> {
         let mut r = MessageBody::default();
         let inner: ParseBuffer;
@@ -852,7 +870,7 @@ impl MessageBody {
                 continue;
             }
             if mode.is_most_non_fields_allowed() {
-                if let Some((field_nums, field_names)) = Self::try_parse_reserved(input)? {
+                if let Some((field_nums, field_names)) = Self::try_parse_reserved(&inner)? {
                     r.reserved_nums.extend(field_nums);
                     r.reserved_names.extend(field_names);
                     continue;
@@ -919,6 +937,7 @@ impl MessageBody {
                 proto_version,
                 mode,
                 parent_name,
+                enum_flag,
             )?));
         }
 
@@ -1087,6 +1106,7 @@ impl Field {
         proto_version: usize,
         mode: MessageBodyParseMode,
         parent_name: Option<&Ident>,
+        enum_field: bool,
     ) -> syn::Result<Self> {
         let rule = if input.peek_as_ident("map", false) {
             if !mode.map_allowed() {
@@ -1117,6 +1137,7 @@ impl Field {
                 proto_version,
                 MessageBodyParseMode::parse_message(proto_version),
                 parent_name,
+                enum_field,
             )?;
             let fields = fields
                 .into_iter()
@@ -1138,6 +1159,7 @@ impl Field {
                 typ: FieldType::Group(Group { name, fields }),
                 tag,
                 options: Vec::new(),
+                enum_field,
             })
         } else {
             let typ = FieldType::parse(input)?;
@@ -1158,6 +1180,7 @@ impl Field {
                 typ,
                 tag,
                 options,
+                enum_field,
             })
         }
     }
@@ -1248,6 +1271,7 @@ impl OneOf {
                 proto_version,
                 MessageBodyParseMode::Oneof,
                 parent_name,
+                true,
             )?;
             let fields = fields
                 .into_iter()
@@ -1270,7 +1294,7 @@ impl OneOf {
             let tags = LitStr::new(
                 &fields
                     .iter()
-                    .map(|f| f.name.to_string())
+                    .map(|f| f.tag.to_lit_str().value())
                     .collect::<Vec<_>>()
                     .join(", "),
                 span,
@@ -1280,12 +1304,14 @@ impl OneOf {
                 .ok_or(syn::Error::new(name.span(), "missing parent message"))?
                 .to_ident_with_case(Case::Snake);
 
+            let enum_name = name.to_ident_with_case(Case::UpperCamel);
+
             Ok(Some(OneOf {
-                field_name: name.to_ident_with_case(Case::Snake),
-                enum_name: name.to_ident_with_case(Case::UpperCamel),
-                field_lit: name
+                field_name: name.clone(),
+                field_lit: enum_name
                     .to_lit_str()
                     .with_prefix(format!("{}::", nested_mod_name.to_string())),
+                enum_name,
                 nested_mod_name,
                 tags,
                 name,
@@ -1307,6 +1333,7 @@ impl Extension {
                 proto_version,
                 MessageBodyParseMode::parse_extension(proto_version),
                 None,
+                false,
             )?;
 
             let fields: Vec<Field> = fields

@@ -362,6 +362,7 @@ pub struct Field {
     pub tag: TagValue,
     /// Non-builtin options
     pub options: Vec<ProtobufOption>,
+    pub enum_field: bool,
 }
 
 /// A Protobuf field of oneof group
