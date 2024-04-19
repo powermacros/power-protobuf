@@ -6,6 +6,9 @@ edition = "2021"
 [[example]]
 name = "helloworld"
 
+[[example]]
+name = "multiprotos"
+
 [lib]
 name = "power_porotbuf"
 path = "src/lib.rs"
@@ -22,7 +25,6 @@ nom = "7"
 
 [dev-dependencies]
 tokio = { version = "1.0", features = ["rt-multi-thread", "macros"] }
-power-protobuf = { path = "." }
 tonic = { version = "*" }
 prost = { version = "*" }
 prost-types = { version = "*" }

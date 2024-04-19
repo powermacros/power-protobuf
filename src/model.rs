@@ -4,8 +4,6 @@
 //! [descriptor.proto](https://github.com/google/protobuf/blob/master/src/google/protobuf/descriptor.proto) file
 
 use std::collections::HashMap;
-use std::fmt;
-use std::fmt::Write;
 use std::ops::RangeInclusive;
 
 use indexmap::IndexMap;
@@ -28,18 +26,6 @@ use crate::resolve::TypeResolver;
 #[derive(Debug, Clone, Hash, PartialEq, Eq)]
 pub struct ProtobufPath {
     pub segments: Punctuated<Ident, Token![.]>,
-}
-
-impl fmt::Display for ProtobufPath {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        for (index, segment) in self.segments.iter().enumerate() {
-            if index > 0 {
-                f.write_char('.')?;
-            }
-            f.write_str(&segment.to_string())?;
-        }
-        fmt::Result::Ok(())
-    }
 }
 
 impl ProtobufPath {
@@ -83,6 +69,13 @@ impl ProtobufPath {
     pub fn is_relative(&self) -> bool {
         if let Some(first) = self.segments.first() {
             first.eq("super")
+        } else {
+            false
+        }
+    }
+    pub fn is_self(&self) -> bool {
+        if let Some(first) = self.segments.first() {
+            first.eq("self")
         } else {
             false
         }
@@ -260,6 +253,12 @@ impl FieldType {
                 }
             }
             Self::Map(map) => map.key.is_unresolved() || map.value.is_unresolved(),
+            _ => false,
+        }
+    }
+    pub fn is_message_or_enum(&self) -> bool {
+        match self {
+            Self::MessageOrEnum(_) => true,
             _ => false,
         }
     }

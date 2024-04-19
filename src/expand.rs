@@ -27,7 +27,6 @@ impl ToTokens for Protocol {
             })
             .collect::<Vec<_>>();
         if let Some(Package { package }) = &self.package {
-            let package = package.to_ident_with_case(Case::Snake);
             tokens.append_all(quote! {
                 pub mod #package {
                     #(#decls)*
@@ -148,7 +147,11 @@ impl Field {
                 Modifier::Required => field_type,
             }
         } else {
-            field_type
+            if typ.is_message_or_enum() {
+                quote!(Option<#field_type>)
+            } else {
+                field_type
+            }
         };
 
         let mut prost_args = vec![];
@@ -740,9 +743,20 @@ impl FieldType {
             FieldType::MessageOrEnum(ty) => {
                 let span = ty.type_path.span();
                 match &ty.resolved_type {
-                    ResolvedType::External(_external) => {
-                        let idents = ty.type_path.segments.iter().collect::<Vec<_>>();
-                        quote!(#(#idents)::*)
+                    ResolvedType::External(x) => {
+                        if ty.type_path.is_relative() {
+                            let idents = x
+                                .type_path_segments
+                                .iter()
+                                .map(|s| (s, ty.type_path.span()).to_ident());
+                            quote!(#(#idents)::*)
+                        } else if ty.type_path.is_self() {
+                            let idents = ty.type_path.segments.iter().skip(1);
+                            quote!(#(#idents)::*)
+                        } else {
+                            let idents = ty.type_path.segments.iter();
+                            quote!(#(#idents)::*)
+                        }
                     }
                     ResolvedType::ProtocolInside(ProtocolInsideType { name, .. }) => {
                         name.to_token_stream()

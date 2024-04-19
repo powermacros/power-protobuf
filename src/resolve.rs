@@ -84,9 +84,12 @@ pub struct TypeResolver {
 impl TypeResolver {
     pub fn new() -> Self {
         let call_site = proc_macro::Span::call_site();
-        let src_dir = Self::find_cargo_dir(call_site.source_file().path())
-            .unwrap_or(PathBuf::from_str(env!("CARGO_MANIFEST_DIR")).unwrap())
-            .join("src");
+        let top_dir = Self::find_cargo_dir(call_site.source_file().path())
+            .unwrap_or(PathBuf::from_str(env!("CARGO_MANIFEST_DIR")).unwrap());
+        let r = call_site.source_file().path();
+        let r = r.strip_prefix(&top_dir).unwrap();
+        let mut ri = r.iter();
+        let src_dir = top_dir.join(ri.next().unwrap());
         Self {
             call_path: call_site.source_file().path(),
             _call_site: call_site,
@@ -131,6 +134,9 @@ impl TypeResolver {
                 typ_path.segments.len() - 1,
             )
             .map(|r| r.map(|x| ResolvedType::External(x)))
+        } else if first.eq("self") {
+            self.lookup_in_self(typ_path, &mut iter)
+                .map(|r| r.map(|x| ResolvedType::External(x)))
         } else {
             if first.eq("google") {
                 if let Some((_, next)) = iter.next() {
@@ -172,14 +178,27 @@ impl TypeResolver {
                 }
             }
             // resolve in same file
-            self.lookup(
-                typ_path.span(),
-                self.call_path.clone(),
-                &mut typ_path.segments.iter().enumerate(),
-                typ_path.segments.len() - 1,
-            )
-            .map(|r| r.map(|x| ResolvedType::External(x)))
+            self.lookup_in_self(typ_path, &mut typ_path.segments.iter().enumerate())
+                .map(|r| r.map(|x| ResolvedType::External(x)))
         }
+    }
+
+    fn lookup_in_self<'a>(
+        &mut self,
+        typ_path: &ProtobufPath,
+        iter: &'a mut impl Iterator<Item = (usize, &'a Ident)>,
+    ) -> syn::Result<Option<ExternalType>> {
+        let types = scan_types(typ_path.span(), &self.call_path)?;
+        let t = Self::lookup_in_types(
+            typ_path.span(),
+            &self.call_path,
+            &types,
+            iter,
+            typ_path.segments.len() - 1,
+            vec![],
+        )?;
+        self.cache.insert(self.call_path.clone(), types);
+        Ok(t)
     }
 
     fn lookup<'a>(
@@ -329,7 +348,7 @@ impl TypeResolver {
     }
 }
 
-#[derive(Default)]
+#[derive(Default, Debug)]
 struct PbTypes {
     _scope: String,
     messages: HashSet<String>,

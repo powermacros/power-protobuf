@@ -159,9 +159,32 @@ impl Parse for Protocol {
 
 impl Parse for ProtobufPath {
     fn parse(input: ParseStream) -> syn::Result<Self> {
-        Ok(Self {
-            segments: input.parse_terminated(Ident::parse, Token![.])?,
-        })
+        let mut segments = Punctuated::new();
+        while !input.is_empty() {
+            let ident = if segments.len() == 0 {
+                if input.peek(Token![crate]) {
+                    let tk = input.parse::<Token![crate]>()?;
+                    ("crate", tk.span).to_ident()
+                } else if input.peek(Token![super]) {
+                    let tk = input.parse::<Token![super]>()?;
+                    ("super", tk.span).to_ident()
+                } else if input.peek(Token![self]) {
+                    let tk = input.parse::<Token![self]>()?;
+                    ("self", tk.span).to_ident()
+                } else {
+                    input.parse()?
+                }
+            } else {
+                input.parse()?
+            };
+            segments.push(ident);
+            if input.peek(Token![.]) {
+                segments.push_punct(input.parse::<Token![.]>()?);
+            } else {
+                break;
+            }
+        }
+        Ok(Self { segments })
     }
 }
 

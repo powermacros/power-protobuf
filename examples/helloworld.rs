@@ -1,6 +1,10 @@
-use std::time::Duration;
-use example::{greeter_server::{Greeter,GreeterServer}, HelloReply, SayHelloRequest, greeter_client::GreeterClient};
+use example::{
+    greeter_client::GreeterClient,
+    greeter_server::{Greeter, GreeterServer},
+    HelloReply, SayHelloRequest,
+};
 use power_porotbuf::protobuf;
+use std::time::Duration;
 use tokio::{spawn, time::sleep};
 use tonic::{transport::Server, Request, Response, Status};
 
