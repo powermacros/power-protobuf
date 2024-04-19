@@ -440,7 +440,7 @@ mod fast_pb_parser {
         IResult,
     };
 
-    #[derive(Debug)]
+    #[derive(Debug, PartialEq)]
     pub enum Element<'a> {
         Message(Message<'a>),
         Enum(Enum<'a>),
@@ -584,16 +584,28 @@ mod fast_pb_parser {
                     .into_iter()
                     .map(|rpc| match (rpc.gen_request, rpc.gen_response) {
                         (None, None) => vec![],
-                        (None, Some((name, suffix))) => vec![Message { name, suffix }],
-                        (Some((name, suffix)), None) => vec![Message { name, suffix }],
+                        (None, Some((name, suffix, inner_types))) => vec![Message {
+                            name,
+                            suffix,
+                            inner_types,
+                        }],
+                        (Some((name, suffix, inner_types)), None) => {
+                            vec![Message {
+                                name,
+                                suffix,
+                                inner_types,
+                            }]
+                        }
                         (Some(r), Some(p)) => vec![
                             Message {
                                 name: r.0,
                                 suffix: r.1,
+                                inner_types: r.2,
                             },
                             Message {
                                 name: p.0,
                                 suffix: p.1,
+                                inner_types: p.2,
                             },
                         ],
                     })
@@ -605,8 +617,8 @@ mod fast_pb_parser {
     }
 
     struct Rpc<'a> {
-        gen_request: Option<(&'a str, &'static str)>,
-        gen_response: Option<(&'a str, &'static str)>,
+        gen_request: Option<(&'a str, &'static str, Vec<Element<'a>>)>,
+        gen_response: Option<(&'a str, &'static str, Vec<Element<'a>>)>,
     }
 
     fn pb_rpc(input: &str) -> IResult<&str, Rpc> {
@@ -617,8 +629,12 @@ mod fast_pb_parser {
             preceded(
                 opt(tag_ws_around!("stream")),
                 alt((
-                    map(pb_message_body, |_| Some((rpc_name, "Request"))),
-                    map(terminated(ident, pb_message_body), |name| Some((name, ""))),
+                    map(pb_message_body, |inner_types| {
+                        Some((rpc_name, "Request", inner_types))
+                    }),
+                    map(tuple((ident, pb_message_body)), |(name, types)| {
+                        Some((name, "", types))
+                    }),
                     map(ident, |_| None),
                 )),
             ),
@@ -630,8 +646,12 @@ mod fast_pb_parser {
             preceded(
                 opt(tag_ws_around!("stream")),
                 alt((
-                    map(pb_message_body, |_| Some((rpc_name, "Response"))),
-                    map(terminated(ident, pb_message_body), |name| Some((name, ""))),
+                    map(pb_message_body, |inner_types| {
+                        Some((rpc_name, "Response", inner_types))
+                    }),
+                    map(tuple((ident, pb_message_body)), |(name, inner_types)| {
+                        Some((name, "", inner_types))
+                    }),
                     map(ident, |_| None),
                 )),
             ),
@@ -653,20 +673,20 @@ mod fast_pb_parser {
         ))
     }
 
-    fn pb_message_body(input: &str) -> IResult<&str, ()> {
+    fn pb_message_body(input: &str) -> IResult<&str, Vec<Element>> {
         map(
             delimited(
                 tag_ws_around!("{"),
                 many0(alt((
-                    pb_reserved,
-                    pb_extend,
-                    map(pb_message, |_| ()),
-                    map(pb_enum, |_| ()),
-                    pb_field,
+                    map(pb_reserved, |_| None),
+                    map(pb_extend, |_| None),
+                    map(pb_message, |m| Some(Element::Message(m))),
+                    map(pb_enum, |e| Some(Element::Enum(e))),
+                    map(pb_field, |_| None),
                 ))),
                 tag_ws_around!("}"),
             ),
-            |_| (),
+            |results| results.into_iter().flatten().collect::<Vec<_>>(),
         )(input)
     }
 
@@ -736,25 +756,27 @@ mod fast_pb_parser {
         Ok((rest, ()))
     }
 
-    #[derive(Debug)]
+    #[derive(Debug, PartialEq)]
     pub struct Message<'a> {
         pub name: &'a str,
         pub suffix: &'static str,
+        pub inner_types: Vec<Element<'a>>,
     }
 
     fn pb_message(input: &str) -> IResult<&str, Message> {
         let (rest, message_name) = delimited(tag_ws_around!("message"), ident, ws)(input)?;
-        let (rest, _) = pb_message_body(rest)?;
+        let (rest, inner_types) = pb_message_body(rest)?;
         Ok((
             rest,
             Message {
                 name: message_name,
                 suffix: "",
+                inner_types,
             },
         ))
     }
 
-    #[derive(Debug)]
+    #[derive(Debug, PartialEq)]
     pub struct Enum<'a> {
         pub name: &'a str,
     }
@@ -790,5 +812,89 @@ mod fast_pb_parser {
             ),
             |name| Enum { name },
         )(input)
+    }
+
+    #[cfg(test)]
+    mod test_fast_pb_parser {
+        use crate::resolve::fast_pb_parser::{self, Element, Message};
+
+        fn test_parser(
+            pb_text: &str,
+            expected_package: Option<&str>,
+            expected_elements: Vec<Element>,
+        ) {
+            let (rest, (package, result)) = fast_pb_parser::pb_proto(pb_text).unwrap();
+            if let Some(pos) = pb_text.rfind("}") {
+                assert_eq!(
+                    rest,
+                    pb_text.split_at(pos + 1).1,
+                    "unexpected rest text: {rest}"
+                );
+            }
+            assert!(
+                package.eq(&expected_package),
+                "unexpected package {:#?}",
+                package
+            );
+            assert!(
+                result.eq(&expected_elements),
+                "unexpected result {:#?}",
+                result
+            );
+        }
+
+        #[test]
+        fn test_parse_protocol() {
+            test_parser(
+                r#"{
+                    message A {
+                        message AInner {
+                        }
+                    }
+                }"#,
+                None,
+                vec![Element::Message(Message {
+                    name: "A",
+                    suffix: "",
+                    inner_types: vec![Element::Message(Message {
+                        name: "AInner",
+                        suffix: "",
+                        inner_types: vec![],
+                    })],
+                })],
+            );
+
+            test_parser(
+                r#"{
+                    package abc;
+                    service SomeService {
+                        rpc hello({
+                            string name
+                            message ReqInner {
+                            }
+                        }) returns({
+                            string words
+                        })
+                    }
+                }"#,
+                Some("abc"),
+                vec![
+                    Element::Message(Message {
+                        name: "hello",
+                        suffix: "Request",
+                        inner_types: vec![Element::Message(Message {
+                            name: "ReqInner",
+                            suffix: "",
+                            inner_types: vec![],
+                        })],
+                    }),
+                    Element::Message(Message {
+                        name: "hello",
+                        suffix: "Response",
+                        inner_types: vec![],
+                    }),
+                ],
+            );
+        }
     }
 }
