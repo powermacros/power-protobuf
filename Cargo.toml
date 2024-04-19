@@ -4,9 +4,9 @@ version = "0.1.0"
 edition = "2021"
 description = "a proc-macro for embedding protobuf inside rust code"
 license = "MIT"
-documentation = "https://docs.rs/syn-prelude"
-homepage = "https://github.com/powermacros/syn-prelude"
-repository = "https://github.com/powermacros/syn-prelude"
+documentation = "https://docs.rs/power-protobuf"
+homepage = "https://github.com/powermacros/power-protobuf"
+repository = "https://github.com/powermacros/power-protobuf"
 
 [[example]]
 name = "helloworld"
@@ -29,12 +29,12 @@ indexmap = { version = "2.0" }
 nom = "7"
 
 [dev-dependencies]
-tokio = { version = "1.0", features = ["rt-multi-thread", "macros"] }
-tonic = { version = "*" }
-prost = { version = "*" }
-prost-types = { version = "*" }
+tokio = { version = "1.37.0", features = ["rt-multi-thread", "macros"] }
+tonic = { version = "0.11.0" }
+prost = { version = "0.12.4" }
+prost-types = { version = "0.12.4" }
 serde = { version = "1", features = ["derive"] }
-http = { version = "*" }
+http = { version = "1.1.0" }
 
 [features]
 default = ["impl_prost", "tagless", "simplize_rpc_params", "derive_serde"]
