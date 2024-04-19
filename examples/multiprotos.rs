@@ -24,11 +24,11 @@ protobuf! {
       }
 }
 
-// protobuf! {
-//     message MessageinAnotherScope {
-//         scope1.Message1 inner;
-//         self.scope1.Message1 inner2;
-//     }
-// }
+protobuf! {
+    message MessageinAnotherScope {
+        scope1.Message1 inner;
+        self.scope1.Message1 inner2;
+    }
+}
 
 fn main() {}

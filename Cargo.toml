@@ -1,6 +1,6 @@
 [package]
 name = "power-protobuf"
-version = "0.1.0"
+version = "0.1.1"
 edition = "2021"
 description = "a proc-macro for embedding protobuf inside rust code"
 license = "MIT"
