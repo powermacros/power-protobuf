@@ -1,40 +1,21 @@
 [package]
-name = "power-protobuf"
+name = "power-protobuf-lib"
 version = "0.1.2"
 edition = "2021"
-description = "a proc-macro for embedding protobuf inside rust code"
+description = "lib for protobuf!"
 license = "MIT"
-documentation = "https://docs.rs/power-protobuf"
+documentation = "https://docs.rs/power-protobuf-lib"
 homepage = "https://github.com/powermacros/power-protobuf"
 repository = "https://github.com/powermacros/power-protobuf"
-
-[workspace]
-members = ["lib"]
-
-[[example]]
-name = "helloworld"
-
-[[example]]
-name = "multiprotos"
-
-[lib]
-name = "power_porotbuf"
-path = "src/lib.rs"
-proc-macro = true
 
 [dependencies]
 syn = { version = "2", features = ["full", "extra-traits"] }
 proc-macro2 = { version = "1", features = ["span-locations"] }
 quote = { version = "1" }
-power-protobuf-lib = { version = "0.1.2" }
-
-[dev-dependencies]
-tokio = { version = "1.37.0", features = ["rt-multi-thread", "macros"] }
-tonic = { version = "0.11.0" }
-prost = { version = "0.12.4" }
-prost-types = { version = "0.12.4" }
-serde = { version = "1", features = ["derive"] }
-http = { version = "1.1.0" }
+convert_case = "0.6"
+syn-prelude = { version = "0.1.2" }
+indexmap = { version = "2.0" }
+nom = "7"
 
 [features]
 default = ["impl_prost", "tagless", "simplize_rpc_params", "derive_serde"]

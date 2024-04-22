@@ -2,14 +2,9 @@
 #![feature(proc_macro_span)]
 
 use model::Protocol;
+use power_protobuf_lib::Protocol;
 use quote::ToTokens;
 use syn::parse::Parse;
-
-mod dep;
-mod expand;
-mod model;
-mod parse;
-mod resolve;
 
 struct ProtobufMacro {
     inner: Protocol,
