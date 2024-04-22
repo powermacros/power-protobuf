@@ -1,6 +1,6 @@
 [package]
 name = "power-protobuf-lib"
-version = "0.1.3"
+version = "0.1.4"
 edition = "2021"
 description = "lib for protobuf!"
 license = "MIT"
@@ -15,7 +15,8 @@ quote = { version = "1" }
 convert_case = "0.6"
 syn-prelude = { version = "0.1.2" }
 indexmap = { version = "2.0" }
-nom = "7"
+nom = "7.1.3"
+cargo_toml = "0.20.0"
 
 [features]
 default = ["impl_prost", "tagless", "simplize_rpc_params", "derive_serde"]

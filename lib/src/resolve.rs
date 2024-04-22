@@ -347,7 +347,9 @@ impl ResolveContext<'_> {
 
 pub trait PathMod {
     fn new() -> Self;
+    fn from_idents(idents: impl Iterator<Item = Ident>) -> Self;
     fn push(&mut self, type_name_seg: &Ident) -> &mut Self;
+    fn push_ident(&mut self, type_name_seg: Ident) -> &mut Self;
     fn push_import_with_scope(&mut self, import: &Import, package: Option<&Ident>) -> &mut Self;
     fn push_type_path<'a>(
         &mut self,
@@ -363,6 +365,25 @@ impl PathMod for syn::Path {
             leading_colon: None,
             segments: Punctuated::new(),
         }
+    }
+
+    fn from_idents(mut idents: impl Iterator<Item = Ident>) -> Self {
+        let mut new = Self::new();
+        while let Some(seg) = idents.next() {
+            if new.segments.is_empty() {
+                new.push_ident(("crate", seg.span()).to_ident());
+            }
+            new.push_ident(seg);
+        }
+        new
+    }
+
+    fn push_ident(&mut self, type_name_seg: Ident) -> &mut Self {
+        self.segments.push(PathSegment {
+            ident: type_name_seg,
+            arguments: syn::PathArguments::None,
+        });
+        self
     }
 
     fn push(&mut self, type_name_seg: &Ident) -> &mut Self {

@@ -38,7 +38,7 @@ impl Protocol {
     ) -> syn::Result<Self> {
         let syntax: Syntax = input.parse()?;
         let mut protocol = Self {
-            imports: vec![Import::call_site(&call_site_path)?],
+            imports: Default::default(),
             syntax,
             package: None,
             messages: Default::default(),
@@ -52,6 +52,9 @@ impl Protocol {
 
         let proto_version = syntax.version();
 
+        protocol
+            .imports
+            .push(Import::call_site(&protocol.deps, &call_site_path)?);
         while !input.is_empty() {
             if input.peek(Token![;]) {
                 input.parse::<Token![;]>()?;
@@ -95,8 +98,8 @@ impl Protocol {
             {
                 protocol.decls.push(DeclIndex::Enum(protocol.enums.len()));
                 protocol.enums.push(enumeration);
-            } else if let Some(import) =
-                Import::try_parse(input).add_error_suffix("while parsing import clause")?
+            } else if let Some(import) = Import::try_parse(&protocol.deps, input)
+                .add_error_suffix("while parsing import clause")?
             {
                 protocol.imports.push(import);
             } else if let Some(option) =
@@ -351,27 +354,20 @@ impl Parse for Syntax {
 
 impl Import {
     // call_site_path = proc_macro::Span::call_site().source_file().path();
-    fn call_site(call_site_path: &PathBuf) -> syn::Result<Self> {
+    fn call_site(deps: &Deps, call_site_path: &PathBuf) -> syn::Result<Self> {
         let span = Span::call_site();
         let path_value = call_site_path.to_string_lossy().to_string();
-        let (under_src_dir, is_root, is_mod, file_path, mod_path) =
-            Self::check_file_path(call_site_path, &path_value, span)?;
+        let file_path = deps.resolve_path(&path_value, span)?;
         let path = (path_value, span).to_lit_str();
         Ok(Self {
             import_token: span,
             path,
             builtin: false,
             vis: ImportVis::Default,
-            file_path: Some(FilePath {
-                root: is_root,
-                example: !under_src_dir,
-                is_mod: is_mod,
-                path: file_path,
-                mod_path: mod_path,
-            }),
+            file_path: Some(file_path),
         })
     }
-    fn try_parse(input: ParseStream) -> syn::Result<Option<Self>> {
+    fn try_parse(deps: &Deps, input: ParseStream) -> syn::Result<Option<Self>> {
         if let Some(i) = input.try_parse_as_ident("import", false) {
             let vis = if let Some(weak) = input.try_parse_as_ident("weak", false) {
                 ImportVis::Weak(weak.span())
@@ -392,17 +388,7 @@ impl Import {
                 false
             };
             let file_path = if !builtin {
-                let file_path = PathBuf::from_str(&path_value)
-                    .map_err(|_| path.span().to_syn_error("path does not exist"))?;
-                let (under_src_dir, is_root, is_mod, file_path, mod_path) =
-                    Self::check_file_path(file_path, &path_value, path.span())?;
-                Some(FilePath {
-                    root: is_root,
-                    example: !under_src_dir,
-                    is_mod,
-                    path: file_path,
-                    mod_path,
-                })
+                Some(deps.resolve_path(&path_value, path.span())?)
             } else {
                 None
             };
@@ -417,86 +403,6 @@ impl Import {
         } else {
             Ok(None)
         }
-    }
-
-    fn check_file_path(
-        file_path: impl AsRef<Path>,
-        path_value: &str,
-        span: Span,
-    ) -> syn::Result<(bool, bool, bool, PathBuf, syn::Path)> {
-        Ok(if path_value.starts_with("src/") {
-            let p = path_value.trim_start_matches("src/");
-            let root = p.eq("lib.rs") || p.eq("main.rs");
-            let is_mod = p.ends_with("/mod.rs");
-            let mut mod_path = syn::Path::new();
-            mod_path.push(&("crate", span).to_ident());
-
-            if is_mod {
-                for seg in p.trim_end_matches("/mod.rs").split("/") {
-                    if !p.is_empty() {
-                        mod_path.push(&(seg, span).to_ident());
-                    }
-                }
-            } else if !root {
-                for seg in p.split("/") {
-                    if !p.is_empty() {
-                        mod_path.push(&(seg, span).to_ident());
-                    }
-                }
-            }
-            (
-                true,
-                root,
-                is_mod,
-                file_path.as_ref().to_path_buf(),
-                mod_path,
-            )
-        } else if file_path.as_ref().starts_with("examples/") {
-            let mut mod_path = syn::Path::new();
-            mod_path.push(&("crate", span).to_ident());
-            (
-                false,
-                true,
-                false,
-                file_path.as_ref().to_path_buf(),
-                mod_path,
-            )
-        } else {
-            let file_path = PathBuf::from_str(&format!("src/{}", &path_value))
-                .map_err(|_| span.to_syn_error("path does not exist"))?;
-            if !file_path.exists() {
-                let file_path = PathBuf::from_str(&format!("examples/{}", &path_value))
-                    .map_err(|_| span.to_syn_error("path does not exist"))?;
-                if file_path.exists() {
-                    let mut mod_path = syn::Path::new();
-                    mod_path.push(&("crate", span).to_ident());
-                    (false, true, false, file_path, mod_path)
-                } else {
-                    span.to_syn_error("cannot locate this import path")
-                        .to_err()?
-                }
-            } else {
-                let root = path_value.eq("lib.rs") || path_value.eq("main.rs");
-                let is_mod = path_value.ends_with("/mod.rs");
-                let mut mod_path = syn::Path::new();
-                mod_path.push(&("crate", span).to_ident());
-
-                if is_mod {
-                    for seg in path_value.trim_end_matches("/mod.rs").split("/") {
-                        if !path_value.is_empty() {
-                            mod_path.push(&(seg, span).to_ident());
-                        }
-                    }
-                } else if !root {
-                    for seg in path_value.split("/") {
-                        if !path_value.is_empty() {
-                            mod_path.push(&(seg, span).to_ident());
-                        }
-                    }
-                }
-                (true, root, is_mod, file_path, mod_path)
-            }
-        })
     }
 }
 

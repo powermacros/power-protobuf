@@ -512,6 +512,7 @@ pub struct Import {
 #[derive(Debug, Clone)]
 pub struct FilePath {
     pub root: bool,
+    pub bin: bool,
     pub example: bool,
     pub is_mod: bool,
     pub path: PathBuf,

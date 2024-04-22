@@ -1,15 +1,16 @@
 use std::{
-    collections::HashMap,
+    collections::{HashMap, HashSet},
     fs::{self, read_to_string},
     ops::Range,
-    path::PathBuf,
+    path::{Path, PathBuf},
 };
 
+use cargo_toml::Manifest;
 use proc_macro2::Span;
 use syn::parse::ParseStream;
-use syn_prelude::{ToErr, ToSynError};
+use syn_prelude::{ToErr, ToIdent, ToSynError};
 
-use crate::model::Import;
+use crate::{model::Import, resolve::PathMod, FilePath};
 
 #[derive(Debug, Clone)]
 pub struct ExternalTypeRef {
@@ -22,13 +23,66 @@ pub struct ExternalTypeRef {
 pub struct Deps {
     pub current_source_range: Range<usize>,
     pub scopes: HashMap<String, HashMap<String, ExternalTypeRef>>,
+    pub project_root: String,
+    pub project_root_path: PathBuf,
+    pub bin_paths: HashSet<String>,
+    pub example_paths: HashSet<String>,
+    pub lib_path: String,
 }
 
 impl Deps {
     pub fn new(call_site_path: &PathBuf, input: ParseStream) -> syn::Result<Self> {
+        fn find_cargo_toml(path: impl AsRef<Path>) -> Option<PathBuf> {
+            if let Some(parent) = path.as_ref().parent() {
+                let p = parent.join("Cargo.toml");
+                if p.exists() && p.is_file() {
+                    Some(p)
+                } else {
+                    find_cargo_toml(parent)
+                }
+            } else {
+                None
+            }
+        }
+        let project_manifest_path = find_cargo_toml(call_site_path)
+            .ok_or(input.span().to_syn_error("cannot find project Cargo.toml"))?;
+        let project_manifest = Manifest::from_path(&project_manifest_path)
+            .map_err(|err| input.span().to_syn_error(err.to_string()))?;
+
+        let mut lib_path = "src/lib.rs".to_owned();
+        if let Some(lib) = project_manifest.lib {
+            if let Some(path) = lib.path {
+                lib_path = path;
+            }
+        }
+        let bin_paths = project_manifest
+            .bin
+            .iter()
+            .filter_map(|bin| bin.path.clone())
+            .collect::<HashSet<_>>();
+        let example_paths = project_manifest
+            .example
+            .iter()
+            .filter_map(|example| {
+                if let Some(path) = example.path.as_ref() {
+                    Some(path.clone())
+                } else if let Some(name) = example.name.as_ref() {
+                    Some(format!("examples/{name}.rs"))
+                } else {
+                    None
+                }
+            })
+            .collect::<HashSet<_>>();
+
+        let project_root_path = project_manifest_path.parent().unwrap().to_path_buf();
         let mut slf = Self {
             current_source_range: Span::call_site().byte_range(),
             scopes: Default::default(),
+            project_root: project_root_path.to_string_lossy().to_string(),
+            project_root_path,
+            lib_path,
+            bin_paths,
+            example_paths,
         };
         let contents = fs::read_to_string(call_site_path)
             .map_err(|_err| input.span().to_syn_error("cannot read source file"))?;
@@ -182,6 +236,74 @@ impl Deps {
             }
         }
         Ok(())
+    }
+}
+
+impl Deps {
+    pub fn resolve_path(&self, path: impl AsRef<str>, span: Span) -> syn::Result<FilePath> {
+        let p = path
+            .as_ref()
+            .trim_start_matches(&self.project_root)
+            .trim_start_matches("/");
+        if p.eq(&self.lib_path) {
+            let mut mod_path = syn::Path::new();
+            mod_path.push_ident(("crate", span).to_ident());
+            Ok(FilePath {
+                root: true,
+                bin: false,
+                example: false,
+                is_mod: false,
+                path: self.project_root_path.join(&self.lib_path),
+                mod_path,
+            })
+        } else if self.bin_paths.contains(p) {
+            let mut mod_path = syn::Path::new();
+            mod_path.push_ident(("crate", span).to_ident());
+            Ok(FilePath {
+                root: true,
+                bin: true,
+                example: false,
+                is_mod: false,
+                path: self.project_root_path.join(p),
+                mod_path,
+            })
+        } else if self.example_paths.contains(p) {
+            let mut mod_path = syn::Path::new();
+            mod_path.push_ident(("crate", span).to_ident());
+            Ok(FilePath {
+                root: true,
+                bin: false,
+                example: true,
+                is_mod: false,
+                path: self.project_root_path.join(p),
+                mod_path,
+            })
+        } else {
+            let p = p.trim_start_matches("src/");
+            let path = self.project_root_path.join("src").join(p);
+            if !path.exists() {
+                return span
+                    .to_syn_error(format!("path {:?} does not exist", &path))
+                    .to_err();
+            }
+            let mut is_mod = false;
+            let p = if p.ends_with("/mod.rs") {
+                is_mod = true;
+                p.trim_end_matches("/mod.rs")
+            } else {
+                p.trim_end_matches(".rs")
+            };
+            let mod_path =
+                syn::Path::from_idents(p.split("/").into_iter().map(|p| (p, span).to_ident()));
+            Ok(FilePath {
+                root: false,
+                bin: false,
+                is_mod,
+                example: false,
+                path,
+                mod_path,
+            })
+        }
     }
 }
 
