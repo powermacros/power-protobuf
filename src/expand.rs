@@ -4,13 +4,10 @@ use quote::{quote, quote_spanned, ToTokens, TokenStreamExt};
 use syn::{punctuated::Punctuated, spanned::Spanned, Ident, LitStr};
 use syn_prelude::{ToIdent, ToIdentWithCase, ToLitStr, WithPrefix, WithSuffix};
 
-use crate::{
-    model::{
-        DeclIndex, EnumValue, Enumeration, Field, FieldType, GetOption, Message, MessageElement,
-        Method, Modifier, NestedTypeIndex, OneOf, Package, ProtobufConstant, ProtobufOption,
-        ProtobufPath, Protocol, Service,
-    },
-    resolve::{GoogleBultin, InnerType, ProtocolInsideType, ResolvedType},
+use crate::model::{
+    DeclIndex, EnumValue, Enumeration, Field, FieldType, GetOption, Message, MessageElement,
+    Method, Modifier, NestedTypeIndex, OneOf, Package, ProtobufConstant, ProtobufOption,
+    ProtobufPath, Protocol, Service, Type,
 };
 
 impl ToTokens for Protocol {
@@ -132,7 +129,7 @@ impl Field {
         let deprecated = options.deprecated();
         let tag = number.to_lit_str();
 
-        let (optional, repeated, field_type) = self.to_type_tokens(0);
+        let (optional, repeated, field_type) = self.to_type_tokens();
 
         let mut prost_args = vec![];
         if let Some(ty) = typ.to_prost_type() {
@@ -152,7 +149,7 @@ impl Field {
         }
     }
 
-    fn to_type_tokens(&self, depth: usize) -> (bool, bool, TokenStream) {
+    fn to_type_tokens(&self) -> (bool, bool, TokenStream) {
         let Field {
             modifier,
             typ,
@@ -160,7 +157,7 @@ impl Field {
             enum_field,
             ..
         } = self;
-        let field_type = typ.to_tokens(depth, Some(options));
+        let field_type = typ.to_tokens(Some(options));
         let mut optional = false;
         let mut repeated = false;
         let typ = if let Some(modifier) = modifier {
@@ -471,14 +468,9 @@ impl Method {
         let Self {
             method_name,
             input_type,
-            input_type_ref,
             output_type,
-            output_type_ref,
             ..
         } = self;
-
-        let input_type = Self::param_type(input_type, input_type_ref);
-        let output_type = Self::param_type(output_type, output_type_ref);
 
         let method_name_lit = method_name
             .to_ident_with_case(Case::UpperCamel)
@@ -508,15 +500,18 @@ impl Method {
     fn impl_server_trait_method(&self) -> TokenStream {
         let Self {
             method_name,
-            input_type,
-            input_type_ref,
-            output_type,
-            output_type_ref,
+            input_type:
+                Type {
+                    complete_path: input_type,
+                    ..
+                },
+            output_type:
+                Type {
+                    complete_path: output_type,
+                    ..
+                },
             ..
         } = self;
-
-        let input_type = Self::param_type(input_type, input_type_ref);
-        let output_type = Self::param_type(output_type, output_type_ref);
 
         quote! {
             async fn #method_name(
@@ -535,7 +530,11 @@ impl Method {
         server_trait: &Ident,
     ) -> TokenStream {
         let Self {
-            name, method_name, ..
+            name,
+            method_name,
+            input_type,
+            output_type,
+            ..
         } = self;
         let case_lit = service_name
             .with_prefix("/")
@@ -543,9 +542,6 @@ impl Method {
             .with_suffix(name.to_ident_with_case(Case::UpperCamel).to_string());
 
         let struct_name = name.to_ident_with_case(Case::Camel).with_suffix("Svc");
-
-        let input_type = Self::param_type(&self.input_type, &self.input_type_ref);
-        let output_type = Self::param_type(&self.output_type, &self.output_type_ref);
 
         quote! {
             #case_lit => {
@@ -592,25 +588,6 @@ impl Method {
                 };
                 Box::pin(fut)
             }
-        }
-    }
-
-    fn param_type(typ: &ProtobufPath, resolved_type: &ResolvedType) -> TokenStream {
-        if typ.is_local() {
-            quote!(super::#typ)
-        } else if typ.is_relative() {
-            if let ResolvedType::External(x) = resolved_type {
-                let segs = x
-                    .type_path_segments
-                    .iter()
-                    .map(|s| (s, typ.span()).to_ident())
-                    .collect::<Vec<_>>();
-                quote!(#(#segs)::*)
-            } else {
-                unreachable!()
-            }
-        } else {
-            typ.to_token_stream()
         }
     }
 }
@@ -711,7 +688,7 @@ impl OneOf {
         let field_tokens = fields.iter().map(|field| {
             let Field { name, typ, tag, .. } = field;
             let prost_type = typ.to_prost_type();
-            let (_, _, typ) = field.to_type_tokens(1);
+            let (_, _, typ) = field.to_type_tokens();
             let name = name.to_ident_with_case(Case::UpperCamel);
             let tag = tag.to_lit_str();
             quote! {
@@ -743,8 +720,15 @@ impl ToTokens for ProtobufPath {
     }
 }
 
+impl ToTokens for Type {
+    fn to_tokens(&self, tokens: &mut TokenStream) {
+        let Self { complete_path, .. } = self;
+        tokens.append_all(quote!(#complete_path))
+    }
+}
+
 impl FieldType {
-    fn to_tokens(&self, depth: usize, options: Option<&Vec<ProtobufOption>>) -> TokenStream {
+    fn to_tokens(&self, options: Option<&Vec<ProtobufOption>>) -> TokenStream {
         match self {
             FieldType::Int32(span) => Ident::new("i32", *span).to_token_stream(),
             FieldType::Int64(span) => Ident::new("i64", *span).to_token_stream(),
@@ -761,91 +745,10 @@ impl FieldType {
             FieldType::Double(span) => Ident::new("f64", *span).to_token_stream(),
             FieldType::String(span) => quote_spanned!(*span => ::prost::alloc::string::String),
             FieldType::Bytes(span) => quote_spanned!(*span => ::prost::alloc::vec::Vec<u8>),
-            FieldType::MessageOrEnum(ty) => {
-                let span = ty.type_path.span();
-                match &ty.resolved_type {
-                    ResolvedType::External(x) => {
-                        if ty.type_path.is_relative() {
-                            let idents = x
-                                .type_path_segments
-                                .iter()
-                                .map(|s| (s, ty.type_path.span()).to_ident());
-                            quote!(#(#idents)::*)
-                        } else if ty.type_path.is_self() {
-                            let idents = ty.type_path.segments.iter().skip(1);
-                            quote!(#(#idents)::*)
-                        } else {
-                            let mut idents = ty
-                                .type_path
-                                .segments
-                                .iter()
-                                .map(|c| c.clone())
-                                .collect::<Vec<_>>();
-                            if depth > 0 {
-                                if depth == 1 {
-                                    idents.insert(0, ("super", ty.type_path.span()).to_ident());
-                                } else {
-                                    // FIXME: calculate absolute mod path
-                                }
-                            }
-                            quote!(#(#idents)::*)
-                        }
-                    }
-                    ResolvedType::ProtocolInside(ProtocolInsideType { name, .. }) => {
-                        if depth > 0 {
-                            if depth == 1 {
-                                quote!(super::#name)
-                            } else {
-                                todo!("implement")
-                            }
-                        } else {
-                            name.to_token_stream()
-                        }
-                    }
-                    ResolvedType::Inner(InnerType {
-                        inner_mod_name,
-                        inner_type_name,
-                        ..
-                    }) => {
-                        quote!(#inner_mod_name::#inner_type_name)
-                    }
-                    ResolvedType::Google(google) => match google {
-                        GoogleBultin::Any => todo!(),
-                        GoogleBultin::Empty => quote_spanned!(span => ()),
-                        GoogleBultin::Timestamp => todo!(),
-                        GoogleBultin::Duration => todo!(),
-                        GoogleBultin::Struct => todo!(),
-                        GoogleBultin::Value => todo!(),
-                        GoogleBultin::Null => todo!(),
-                        GoogleBultin::List => todo!(),
-                        GoogleBultin::Type => todo!(),
-                        GoogleBultin::Field => todo!(),
-                        GoogleBultin::Enum => todo!(),
-                        GoogleBultin::EnumValue => todo!(),
-                        GoogleBultin::Option => todo!(),
-                        GoogleBultin::Api => todo!(),
-                        GoogleBultin::Method => todo!(),
-                        GoogleBultin::Mixin => todo!(),
-                        GoogleBultin::FieldMask => todo!(),
-                        GoogleBultin::Double | GoogleBultin::Float => {
-                            Ident::new("f64", span).to_token_stream()
-                        }
-                        GoogleBultin::Int64 => Ident::new("i64", span).to_token_stream(),
-                        GoogleBultin::Uint64 => Ident::new("u64", span).to_token_stream(),
-                        GoogleBultin::Int32 => Ident::new("i32", span).to_token_stream(),
-                        GoogleBultin::Uint32 => Ident::new("u32", span).to_token_stream(),
-                        GoogleBultin::Bool => Ident::new("bool", span).to_token_stream(),
-                        GoogleBultin::String => {
-                            quote_spanned!(span => ::prost::alloc::string::String)
-                        }
-                        GoogleBultin::Bytes => quote_spanned!(span => ::prost::alloc::vec::Vec<u8>),
-                    },
-                    ResolvedType::Unresolved => unreachable!(),
-                }
-            }
+            FieldType::MessageOrEnum(ty) => ty.complete_path.to_token_stream(),
             FieldType::Map(map) => {
-                let key_type = map.key.as_ref().to_tokens(depth, None);
-                let value_type = map.value.as_ref().to_tokens(depth, None);
+                let key_type = map.key.as_ref().to_tokens(None);
+                let value_type = map.value.as_ref().to_tokens(None);
 
                 let opt = options
                     .map(|opts| opts.iter().find(|opt| opt.name.is_option("map_type")))
@@ -890,40 +793,16 @@ impl FieldType {
             Self::Fixed32(span) => ("fixed32", *span).to_ident().to_token_stream(),
             Self::Sfixed32(span) => ("sfixed32", *span).to_ident().to_token_stream(),
             Self::Float(span) => ("float", *span).to_ident().to_token_stream(),
-            Self::MessageOrEnum(ty) => match &ty.resolved_type {
-                ResolvedType::External(x) => {
-                    if x.is_message {
-                        ("message", ty.type_path.span())
-                            .to_ident()
-                            .to_token_stream()
-                    } else {
-                        let e = (x.type_name.as_str(), ty.type_path.span()).to_lit_str();
-                        quote!(enumeration = #e)
-                    }
+            Self::MessageOrEnum(ty) => {
+                if ty.target_is_message {
+                    ("message", ty.complete_path.span())
+                        .to_ident()
+                        .to_token_stream()
+                } else {
+                    let enum_type = ty.type_path.local_name().to_lit_str();
+                    quote!(enumeration = #enum_type)
                 }
-                ResolvedType::ProtocolInside(inside) => {
-                    if inside.is_message {
-                        ("message", inside.name.span()).to_ident().to_token_stream()
-                    } else {
-                        let e = inside.name.to_lit_str();
-                        quote!(enumeration = #e)
-                    }
-                }
-                ResolvedType::Inner(inner) => {
-                    if inner.is_message {
-                        ("message", inner.inner_type_name.span())
-                            .to_ident()
-                            .to_token_stream()
-                    } else {
-                        let e = inner.inner_type_name.to_lit_str();
-                        quote!(enumeration = #e)
-                    }
-                }
-                ResolvedType::Google(_) => ("message", ty.type_path.span())
-                    .to_ident()
-                    .to_token_stream(),
-                ResolvedType::Unresolved => unimplemented!(),
-            },
+            }
             Self::Group(g) => ("group", g.name.span()).to_ident().to_token_stream(),
             Self::Map(_) => return None,
         })

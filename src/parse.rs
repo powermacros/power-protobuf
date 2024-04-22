@@ -1,11 +1,15 @@
-use std::{collections::HashMap, ops::RangeInclusive};
+use std::{
+    collections::HashMap,
+    ops::RangeInclusive,
+    path::{Path, PathBuf},
+    str::FromStr,
+};
 
 use convert_case::Case;
 use proc_macro2::Span;
 use syn::{
     parse::{Parse, ParseBuffer, ParseStream},
     punctuated::Punctuated,
-    spanned::Spanned,
     token, Ident, LitBool, LitInt, LitStr, Token,
 };
 use syn_prelude::{
@@ -14,22 +18,23 @@ use syn_prelude::{
 };
 
 use crate::{
+    dep::Deps,
     model::{
-        AnyTypeUrl, DeclIndex, EnumValue, Enumeration, Extension, Field, FieldType, Group, Import,
-        ImportVis, MapType, Message, MessageElement, Method, Modifier, NestedTypeIndex, OneOf,
-        Package, ProtobufConstant, ProtobufConstantMessage, ProtobufConstantMessageFieldName,
-        ProtobufOption, ProtobufOptionName, ProtobufOptionNameExt, ProtobufOptionNamePart,
-        ProtobufPath, Protocol, Service, Syntax, TagValue, TypeRef,
+        AnyTypeUrl, DeclIndex, EnumValue, Enumeration, Extension, Field, FieldType, FilePath,
+        Group, Import, ImportVis, MapType, Message, MessageElement, Method, Modifier,
+        NestedTypeIndex, OneOf, Package, ProtobufConstant, ProtobufConstantMessage,
+        ProtobufConstantMessageFieldName, ProtobufOption, ProtobufOptionName,
+        ProtobufOptionNameExt, ProtobufOptionNamePart, ProtobufPath, Protocol, Service, Syntax,
+        TagValue, Type,
     },
-    resolve::{InnerType, ProtocolInsideType, ResolvedType, TypeResolver},
+    resolve::{InsideType, PathMod, ResolveContext},
 };
 
-impl Parse for Protocol {
-    fn parse(input: ParseStream) -> syn::Result<Self> {
-        let mut resolver = TypeResolver::new();
+impl Protocol {
+    pub fn parse_from_call_site(input: ParseStream, call_site_path: PathBuf) -> syn::Result<Self> {
         let syntax: Syntax = input.parse()?;
         let mut protocol = Self {
-            imports: Default::default(),
+            imports: vec![Import::call_site(&call_site_path)?],
             syntax,
             package: None,
             messages: Default::default(),
@@ -38,6 +43,7 @@ impl Parse for Protocol {
             services: Default::default(),
             options: Default::default(),
             decls: Default::default(),
+            deps: Deps::new(&call_site_path, input)?,
         };
 
         let proto_version = syntax.version();
@@ -107,43 +113,39 @@ impl Parse for Protocol {
         }
 
         protocol.syntax = syntax;
+        for (import_index, import) in protocol.imports.iter().enumerate() {
+            protocol.deps.scan(import_index, import)?;
+        }
 
-        let mut inside_types = protocol
+        let mut types = protocol
             .messages
             .iter()
-            .map(|m| (m.name.clone(), (true, m.name.span())))
+            .map(|m| (m.name.clone(), InsideType::Message((&vec![], m).into())))
             .collect::<HashMap<_, _>>();
         protocol.enums.iter().for_each(|e| {
-            inside_types.insert(e.name.clone(), (false, e.name.span()));
+            types.insert(e.name.clone(), InsideType::Enum(e.name.clone()));
         });
+        protocol.services.iter().for_each(|s| {
+            s.methods.iter().for_each(|m| {
+                if let Some(m) = &m.input_message {
+                    types.insert(m.name.clone(), InsideType::Message((&vec![], m).into()));
+                }
+                if let Some(m) = &m.output_message {
+                    types.insert(m.name.clone(), InsideType::Message((&vec![], m).into()));
+                }
+            })
+        });
+        let ctx = ResolveContext {
+            package: &protocol.package,
+            types,
+            deps: &protocol.deps,
+            imports: &protocol.imports,
+        };
 
         if let Some(err) = protocol
             .messages
             .iter_mut()
-            .map(|m| {
-                match m
-                    .fields
-                    .iter_mut()
-                    .map(|f| match f {
-                        MessageElement::Field(f) => f.resolve_type(&inside_types, &mut resolver),
-                        MessageElement::OneOf(oneof) => match oneof
-                            .fields
-                            .iter_mut()
-                            .map(|f| f.resolve_type(&inside_types, &mut resolver))
-                            .collect::<Vec<syn::Result<_>>>()
-                            .join_errors()
-                        {
-                            Some(err) => Err(err),
-                            None => Ok(()),
-                        },
-                    })
-                    .collect::<Vec<syn::Result<_>>>()
-                    .join_errors()
-                {
-                    Some(err) => Err(err),
-                    None => Ok(()),
-                }
-            })
+            .map(|m| m.resolve(&ctx))
             .collect::<Vec<syn::Result<_>>>()
             .join_errors()
         {
@@ -156,7 +158,17 @@ impl Parse for Protocol {
             .filter_map(|s| {
                 s.methods
                     .iter_mut()
-                    .map(|m| m.resolve_params(&inside_types, &mut resolver))
+                    .map(|m| {
+                        if let Some(message) = &mut m.input_message {
+                            message.resolve(&ctx)?;
+                        }
+                        ctx.resolve_type(None, &mut m.input_type)?;
+                        if let Some(message) = &mut m.output_message {
+                            message.resolve(&ctx)?;
+                        }
+                        ctx.resolve_type(None, &mut m.output_type)?;
+                        Ok(())
+                    })
                     .collect::<Vec<_>>()
                     .join_errors()
             })
@@ -175,23 +187,7 @@ impl Parse for ProtobufPath {
     fn parse(input: ParseStream) -> syn::Result<Self> {
         let mut segments = Punctuated::new();
         while !input.is_empty() {
-            let ident = if segments.len() == 0 {
-                if input.peek(Token![crate]) {
-                    let tk = input.parse::<Token![crate]>()?;
-                    ("crate", tk.span).to_ident()
-                } else if input.peek(Token![super]) {
-                    let tk = input.parse::<Token![super]>()?;
-                    ("super", tk.span).to_ident()
-                } else if input.peek(Token![self]) {
-                    let tk = input.parse::<Token![self]>()?;
-                    ("self", tk.span).to_ident()
-                } else {
-                    input.parse()?
-                }
-            } else {
-                input.parse()?
-            };
-            segments.push(ident);
+            segments.push(input.parse_as_ident()?);
             if input.peek(Token![.]) {
                 segments.push_punct(input.parse::<Token![.]>()?);
             } else {
@@ -334,20 +330,41 @@ impl Parse for Syntax {
             let lit: LitStr = input.parse()?;
             let proto = lit.value();
             let proto = if proto.eq("proto2") {
-                Self::Proto2(Some(lit.span()))
+                Self::Proto2(lit.span())
             } else if proto.eq("proto3") {
-                Self::Proto3(lit.span())
+                Self::Proto3(Some(lit.span()))
             } else {
                 lit.to_syn_error("unknown syntax").to_err()?
             };
             proto
         } else {
-            Self::Proto2(None)
+            Self::Proto3(None)
         })
     }
 }
 
 impl Import {
+    // call_site_path = proc_macro::Span::call_site().source_file().path();
+    fn call_site(call_site_path: &PathBuf) -> syn::Result<Self> {
+        let span = Span::call_site();
+        let path_value = call_site_path.to_string_lossy().to_string();
+        let (under_src_dir, is_root, is_mod, file_path, mod_path) =
+            Self::check_file_path(call_site_path, &path_value, span)?;
+        let path = (path_value, span).to_lit_str();
+        Ok(Self {
+            import_token: span,
+            path,
+            builtin: false,
+            vis: ImportVis::Default,
+            file_path: Some(FilePath {
+                root: is_root,
+                example: !under_src_dir,
+                is_mod: is_mod,
+                path: file_path,
+                mod_path: mod_path,
+            }),
+        })
+    }
     fn try_parse(input: ParseStream) -> syn::Result<Option<Self>> {
         if let Some(i) = input.try_parse_as_ident("import", false) {
             let vis = if let Some(weak) = input.try_parse_as_ident("weak", false) {
@@ -357,15 +374,123 @@ impl Import {
             } else {
                 ImportVis::Default
             };
-            let path = input.parse()?;
+            let path: LitStr = input.parse()?;
+            let path_value = path.value();
+            let builtin = if path_value.starts_with("google/protobuf/") {
+                true
+            } else if !path_value.ends_with(".rs") {
+                path.span()
+                    .to_syn_error("only support for importing '.rs' yet")
+                    .to_err()?
+            } else {
+                false
+            };
+            let file_path = if !builtin {
+                let file_path = PathBuf::from_str(&path_value)
+                    .map_err(|_| path.span().to_syn_error("path does not exist"))?;
+                let (under_src_dir, is_root, is_mod, file_path, mod_path) =
+                    Self::check_file_path(file_path, &path_value, path.span())?;
+                Some(FilePath {
+                    root: is_root,
+                    example: !under_src_dir,
+                    is_mod,
+                    path: file_path,
+                    mod_path,
+                })
+            } else {
+                None
+            };
+
             Ok(Some(Self {
                 import_token: i.span(),
                 vis,
+                builtin,
                 path,
+                file_path,
             }))
         } else {
             Ok(None)
         }
+    }
+
+    fn check_file_path(
+        file_path: impl AsRef<Path>,
+        path_value: &str,
+        span: Span,
+    ) -> syn::Result<(bool, bool, bool, PathBuf, syn::Path)> {
+        Ok(if path_value.starts_with("src/") {
+            let p = path_value.trim_start_matches("src/");
+            let root = p.eq("lib.rs") || p.eq("main.rs");
+            let is_mod = p.ends_with("/mod.rs");
+            let mut mod_path = syn::Path::new();
+            mod_path.push(&("crate", span).to_ident());
+
+            if is_mod {
+                for seg in p.trim_end_matches("/mod.rs").split("/") {
+                    if !p.is_empty() {
+                        mod_path.push(&(seg, span).to_ident());
+                    }
+                }
+            } else if !root {
+                for seg in p.split("/") {
+                    if !p.is_empty() {
+                        mod_path.push(&(seg, span).to_ident());
+                    }
+                }
+            }
+            (
+                true,
+                root,
+                is_mod,
+                file_path.as_ref().to_path_buf(),
+                mod_path,
+            )
+        } else if file_path.as_ref().starts_with("examples/") {
+            let mut mod_path = syn::Path::new();
+            mod_path.push(&("crate", span).to_ident());
+            (
+                false,
+                true,
+                false,
+                file_path.as_ref().to_path_buf(),
+                mod_path,
+            )
+        } else {
+            let file_path = PathBuf::from_str(&format!("src/{}", &path_value))
+                .map_err(|_| span.to_syn_error("path does not exist"))?;
+            if !file_path.exists() {
+                let file_path = PathBuf::from_str(&format!("examples/{}", &path_value))
+                    .map_err(|_| span.to_syn_error("path does not exist"))?;
+                if file_path.exists() {
+                    let mut mod_path = syn::Path::new();
+                    mod_path.push(&("crate", span).to_ident());
+                    (false, true, false, file_path, mod_path)
+                } else {
+                    span.to_syn_error("cannot locate this import path")
+                        .to_err()?
+                }
+            } else {
+                let root = path_value.eq("lib.rs") || path_value.eq("main.rs");
+                let is_mod = path_value.ends_with("/mod.rs");
+                let mut mod_path = syn::Path::new();
+                mod_path.push(&("crate", span).to_ident());
+
+                if is_mod {
+                    for seg in path_value.trim_end_matches("/mod.rs").split("/") {
+                        if !path_value.is_empty() {
+                            mod_path.push(&(seg, span).to_ident());
+                        }
+                    }
+                } else if !root {
+                    for seg in path_value.split("/") {
+                        if !path_value.is_empty() {
+                            mod_path.push(&(seg, span).to_ident());
+                        }
+                    }
+                }
+                (true, root, is_mod, file_path, mod_path)
+            }
+        })
     }
 }
 
@@ -426,7 +551,7 @@ impl Method {
         rpc_name: &Ident,
         proto_version: usize,
         suffix: &'static str,
-    ) -> syn::Result<(Option<Span>, ProtobufPath, Option<Message>)> {
+    ) -> syn::Result<(Option<Span>, Type, Option<Message>)> {
         let inner: ParseBuffer;
         syn::parenthesized!(inner in input);
         let stream = if proto_version != 2 {
@@ -518,7 +643,15 @@ impl Method {
         if !inner.is_empty() {
             inner.span().to_syn_error("expect ')'").to_err()?;
         }
-        Ok((stream.map(|i| i.span()), param_type, message))
+        Ok((
+            stream.map(|i| i.span()),
+            Type {
+                type_path: param_type,
+                target_is_message: true,
+                complete_path: syn::Path::new(),
+            },
+            message,
+        ))
     }
 
     fn continue_to_parse(input: ParseStream, proto_version: usize) -> syn::Result<Self> {
@@ -537,84 +670,11 @@ impl Method {
             client_streaming,
             input_message,
             input_type,
-            input_type_ref: ResolvedType::Unresolved,
             server_streaming,
             output_message,
             output_type,
-            output_type_ref: ResolvedType::Unresolved,
             options,
         })
-    }
-
-    fn resolve_params(
-        &mut self,
-        inside_types: &HashMap<Ident, (bool, Span)>,
-        resolver: &mut TypeResolver,
-    ) -> syn::Result<()> {
-        let input_err = match Self::resolve_param_type(
-            &self.input_message,
-            &self.input_type,
-            inside_types,
-            resolver,
-        ) {
-            Ok(ty) => {
-                self.input_type_ref = ty;
-                None
-            }
-            Err(err) => Some(err),
-        };
-        let output_err = match Self::resolve_param_type(
-            &self.output_message,
-            &self.output_type,
-            inside_types,
-            resolver,
-        ) {
-            Ok(ty) => {
-                self.output_type_ref = ty;
-                None
-            }
-            Err(err) => Some(err),
-        };
-        let err = if let Some(mut err) = input_err {
-            if let Some(e) = output_err {
-                err.combine(e)
-            }
-            err
-        } else if let Some(err) = output_err {
-            err
-        } else {
-            return Ok(());
-        };
-        Err(err)
-    }
-
-    fn resolve_param_type(
-        param_type: &Option<Message>,
-        type_path: &ProtobufPath,
-        inside_types: &HashMap<Ident, (bool, Span)>,
-        resolver: &mut TypeResolver,
-    ) -> syn::Result<ResolvedType> {
-        if let Some(generated) = param_type {
-            Ok(ResolvedType::ProtocolInside(ProtocolInsideType {
-                name: generated.name.clone(),
-                is_message: true,
-            }))
-        } else if type_path.is_local() {
-            if let Some((is_message, span)) = inside_types.get(type_path.local_name()) {
-                Ok(ResolvedType::ProtocolInside(ProtocolInsideType {
-                    name: (type_path.local_name().to_string(), *span).to_ident(),
-                    is_message: *is_message,
-                }))
-            } else {
-                type_path.span().to_syn_error("no such type").to_err()
-            }
-        } else {
-            if let Some(ty) = resolver.resolve(type_path)? {
-                Ok(ty)
-            } else {
-                type_path.span().to_syn_error("no such type").to_err()
-            }
-        }
     }
 }
 
@@ -642,7 +702,7 @@ impl Message {
         if let Some(_) = input.try_parse_as_ident("message", false) {
             let name = input.parse_as_ident()?;
             let MessageBody {
-                mut fields,
+                fields,
                 reserved_nums,
                 reserved_names,
                 messages,
@@ -658,38 +718,6 @@ impl Message {
                 Some(&name),
                 false,
             )?;
-
-            fields.iter_mut().for_each(|field| {
-                if let MessageElement::Field(field) = field {
-                    if let FieldType::MessageOrEnum(t) = &mut field.typ {
-                        if let ResolvedType::Unresolved = t.resolved_type {
-                            if let Some(inner_message) = messages
-                                .iter()
-                                .find(|m| m.name.eq(t.type_path.local_name()))
-                            {
-                                t.resolved_type = ResolvedType::Inner(InnerType {
-                                    message_name: name.clone(),
-                                    inner_mod_name: name.to_ident_with_case(Case::Snake),
-                                    inner_type_name: inner_message.name.clone(),
-                                    is_message: true,
-                                });
-                                return;
-                            }
-                            if let Some(inner_enum) =
-                                enums.iter().find(|e| e.name.eq(t.type_path.local_name()))
-                            {
-                                t.resolved_type = ResolvedType::Inner(InnerType {
-                                    message_name: name.clone(),
-                                    inner_mod_name: name.to_ident_with_case(Case::Snake),
-                                    inner_type_name: inner_enum.name.clone(),
-                                    is_message: false,
-                                });
-                                return;
-                            }
-                        }
-                    }
-                }
-            });
 
             Ok(Some(Self {
                 nested_types,
@@ -1184,24 +1212,6 @@ impl Field {
             })
         }
     }
-
-    fn resolve_type(
-        &mut self,
-        inside_types: &HashMap<Ident, (bool, Span)>,
-        resolver: &mut TypeResolver,
-    ) -> syn::Result<()> {
-        if self.typ.is_unresolved() {
-            if self.typ.resolve_with_inside(inside_types) {
-                Ok(())
-            } else if self.typ.resolve_with_resolver(resolver)? {
-                Ok(())
-            } else {
-                Err(syn::Error::new(self.typ.span(), "no such type"))
-            }
-        } else {
-            Ok(())
-        }
-    }
 }
 
 impl Parse for FieldType {
@@ -1247,10 +1257,10 @@ impl Parse for FieldType {
             }))
         } else {
             let type_path: ProtobufPath = input.parse()?;
-            Ok(Self::MessageOrEnum(TypeRef {
+            Ok(Self::MessageOrEnum(Type {
                 type_path,
-                // resolve later
-                resolved_type: ResolvedType::Unresolved,
+                target_is_message: true,
+                complete_path: syn::Path::new(),
             }))
         }
     }

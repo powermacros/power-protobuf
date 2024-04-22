@@ -1,900 +1,405 @@
-use std::{
-    collections::{HashMap, HashSet},
-    fs,
-    path::{Path, PathBuf},
-    str::FromStr,
-};
+use std::collections::HashMap;
 
 use convert_case::{Case, Casing};
-use proc_macro2::Span;
-use syn::{spanned::Spanned, Ident};
+use syn::{punctuated::Punctuated, spanned::Spanned, Ident, PathSegment};
+use syn_prelude::{JoinSynErrors, ToErr, ToIdent, ToIdentWithCase, ToSynError};
 
-use crate::model::ProtobufPath;
+use crate::{
+    dep::Deps,
+    model::{FieldType, Import, Message, MessageElement, Package, Type},
+};
 
-#[derive(Debug, Clone)]
-pub enum GoogleBultin {
-    Any,
-    Empty,
-    Timestamp,
-    Duration,
-    Struct,
-    Value,
-    Null,
-    List,
-    Type,
-    Field,
-    Enum,
-    EnumValue,
-    Option,
-    Api,
-    Method,
-    Mixin,
-    FieldMask,
-    Double,
-    Float,
-    Int64,
-    Uint64,
-    Int32,
-    Uint32,
-    Bool,
-    String,
-    Bytes,
+#[derive(Debug)]
+pub struct ResolveContext<'a> {
+    pub package: &'a Option<Package>,
+    pub types: HashMap<Ident, InsideType>,
+    pub deps: &'a Deps,
+    pub imports: &'a Vec<Import>,
 }
 
-#[derive(Debug, Clone)]
-pub struct ExternalType {
-    pub source_path: PathBuf,
-    pub package: String,
-    pub type_name: String,
-    pub type_path_segments: Vec<String>,
-    pub is_message: bool,
+#[derive(Debug)]
+pub enum InsideType {
+    Message(MessageHierarchy),
+    Enum(Ident),
 }
 
-#[derive(Debug, Clone)]
-pub struct InnerType {
-    pub message_name: Ident,
-    pub inner_mod_name: Ident,
-    pub inner_type_name: Ident,
-    pub is_message: bool,
+#[derive(Debug)]
+pub struct MessageHierarchy {
+    pub name: Vec<Ident>,
+    pub inner_messages: Option<Vec<MessageHierarchy>>,
+    pub inner_enums: Option<Vec<Ident>>,
 }
 
-#[derive(Debug, Clone)]
-pub struct ProtocolInsideType {
-    pub name: Ident,
-    pub is_message: bool,
-}
-
-#[derive(Debug, Clone)]
-
-pub enum ResolvedType {
-    External(ExternalType),
-    Inner(InnerType),
-    ProtocolInside(ProtocolInsideType),
-    Google(GoogleBultin),
-    Unresolved,
-}
-
-pub struct TypeResolver {
-    _call_site: proc_macro::Span,
-    pub call_path: PathBuf,
-    src_dir: PathBuf,
-    cache: HashMap<PathBuf, HashMap<String, PbTypes>>,
-}
-
-impl TypeResolver {
-    pub fn new() -> Self {
-        let call_site = proc_macro::Span::call_site();
-        let top_dir = Self::find_cargo_dir(call_site.source_file().path())
-            .unwrap_or(PathBuf::from_str(env!("CARGO_MANIFEST_DIR")).unwrap());
-        let r = call_site.source_file().path();
-        let r = r.strip_prefix(&top_dir).unwrap();
-        let mut ri = r.iter();
-        let src_dir = top_dir.join(ri.next().unwrap());
-        Self {
-            call_path: call_site.source_file().path(),
-            _call_site: call_site,
-            src_dir,
-            cache: Default::default(),
+impl Message {
+    pub fn resolve(&mut self, ctx: &ResolveContext) -> syn::Result<()> {
+        if let Some(InsideType::Message(hierarchy)) = ctx.types.get(&self.name) {
+            self.resolve_field_types(ctx, hierarchy)
+        } else {
+            Ok(())
         }
     }
+    fn resolve_field_types(
+        &mut self,
+        ctx: &ResolveContext,
+        hierarchy: &MessageHierarchy,
+    ) -> syn::Result<()> {
+        let mut err = self
+            .messages
+            .iter_mut()
+            .enumerate()
+            .filter_map(|(index, inner_message)| {
+                hierarchy.inner_messages.as_ref().map(|messages| {
+                    inner_message.resolve_field_types(ctx, messages.get(index).unwrap())
+                })
+            })
+            .collect::<Vec<_>>()
+            .join_errors();
 
-    fn find_cargo_dir(path: impl AsRef<Path>) -> Option<PathBuf> {
-        if let Some(parent) = path.as_ref().parent() {
-            if parent.join("Cargo.toml").exists() {
-                Some(parent.to_path_buf())
+        if let Some(err2) = self
+            .fields
+            .iter_mut()
+            .map(|f| match f {
+                MessageElement::Field(f) => ctx.resolve_field_type(Some(hierarchy), &mut f.typ),
+                MessageElement::OneOf(oneof) => match oneof
+                    .fields
+                    .iter_mut()
+                    .map(|f| ctx.resolve_field_type(Some(hierarchy), &mut f.typ))
+                    .collect::<Vec<syn::Result<_>>>()
+                    .join_errors()
+                {
+                    Some(err) => Err(err),
+                    None => Ok(()),
+                },
+            })
+            .collect::<Vec<syn::Result<_>>>()
+            .join_errors()
+        {
+            if let Some(err) = &mut err {
+                err.combine(err2);
             } else {
-                Self::find_cargo_dir(parent)
+                err = Some(err2);
             }
+        }
+
+        match err {
+            Some(err) => Err(err),
+            None => Ok(()),
+        }
+    }
+}
+
+impl From<(&Vec<Ident>, &Message)> for MessageHierarchy {
+    fn from((path, value): (&Vec<Ident>, &Message)) -> Self {
+        let mut current_path = Vec::with_capacity(path.len() + 1);
+        current_path.clone_from(path);
+        current_path.push(value.name.clone());
+        let inner_messages = if value.messages.is_empty() {
+            None
+        } else {
+            Some(
+                value
+                    .messages
+                    .iter()
+                    .map(|m| Self::from((&current_path, m)))
+                    .collect::<Vec<_>>(),
+            )
+        };
+        let inner_enums = if value.enums.is_empty() {
+            None
+        } else {
+            Some(
+                value
+                    .enums
+                    .iter()
+                    .map(|e| e.name.clone())
+                    .collect::<Vec<_>>(),
+            )
+        };
+        Self {
+            name: current_path,
+            inner_messages,
+            inner_enums,
+        }
+    }
+}
+
+impl MessageHierarchy {
+    fn find_message(&self, name: &Ident) -> Option<&Self> {
+        if let Some(inner_messages) = &self.inner_messages {
+            inner_messages
+                .iter()
+                .find(|m| m.name.last().map(|n| n.eq(name)).unwrap_or_default())
         } else {
             None
         }
     }
 
-    pub fn resolve(&mut self, typ_path: &ProtobufPath) -> syn::Result<Option<ResolvedType>> {
-        let mut iter = typ_path.segments.iter().enumerate();
-        let first = if let Some((_, ident)) = iter.next() {
-            ident
+    fn find_enum(&self, name: &Ident) -> Option<&Ident> {
+        if let Some(inner_enums) = &self.inner_enums {
+            inner_enums.iter().find(|e| name.eq(*e))
         } else {
-            Err(syn::Error::new(typ_path.span(), "missing type name"))?
-        };
+            None
+        }
+    }
+}
 
-        if first.eq("crate") {
-            self.lookup(
-                typ_path.span(),
-                self.src_dir.clone(),
-                &mut iter,
-                typ_path.segments.len() - 1,
-            )
-            .map(|r| r.map(|x| ResolvedType::External(x)))
-        } else if first.eq("super") {
-            self.lookup(
-                typ_path.span(),
-                self.call_path.parent().unwrap().to_path_buf(),
-                &mut iter,
-                typ_path.segments.len() - 1,
-            )
-            .map(|r| r.map(|x| ResolvedType::External(x)))
-        } else if first.eq("self") {
-            self.lookup_in_self(typ_path, &mut iter)
-                .map(|r| r.map(|x| ResolvedType::External(x)))
-        } else {
-            if first.eq("google") {
-                if let Some((_, next)) = iter.next() {
-                    if next.eq("protobuf") {
-                        if let Some((_, next)) = iter.next() {
-                            let ty = match next.to_string().as_str() {
-                                "Any" => GoogleBultin::Any,
-                                "Empty" => GoogleBultin::Empty,
-                                "Timestamp" => GoogleBultin::Timestamp,
-                                "Duration" => GoogleBultin::Duration,
-                                "Struct" => GoogleBultin::Struct,
-                                "Value" => GoogleBultin::Value,
-                                "NullValue" => GoogleBultin::Null,
-                                "ListValue" => GoogleBultin::List,
-                                "Type" => GoogleBultin::Type,
-                                "Field" => GoogleBultin::Field,
-                                "Enum" => GoogleBultin::Enum,
-                                "EnumValue" => GoogleBultin::EnumValue,
-                                "Option" => GoogleBultin::Option,
-                                "Api" => GoogleBultin::Api,
-                                "Method" => GoogleBultin::Method,
-                                "Mixin" => GoogleBultin::Mixin,
-                                "FieldMask" => GoogleBultin::FieldMask,
-                                // wrappers
-                                "DoubleValue" => GoogleBultin::Double,
-                                "FloatValue" => GoogleBultin::Float,
-                                "Int64Value" => GoogleBultin::Int64,
-                                "UInt64Value" => GoogleBultin::Uint64,
-                                "Int32Value" => GoogleBultin::Int32,
-                                "UInt32Value" => GoogleBultin::Uint32,
-                                "BoolValue" => GoogleBultin::Bool,
-                                "StringValue" => GoogleBultin::String,
-                                "BytesValue" => GoogleBultin::Bytes,
-                                _ => Err(syn::Error::new(next.span(), "unsupported type"))?,
-                            };
-                            return Ok(Some(ResolvedType::Google(ty)));
+impl ResolveContext<'_> {
+    pub fn resolve_type(
+        &self,
+        parent: Option<&MessageHierarchy>,
+        typ: &mut Type,
+    ) -> syn::Result<()> {
+        let import0 = self.imports.get(0).unwrap();
+        let type_path_seg_first = typ
+            .type_path
+            .segments
+            .first()
+            .ok_or(typ.type_path.span().to_syn_error("missing type name"))?;
+
+        // lookup inner types
+        if let Some(container) = parent {
+            let mut type_name_iter = typ.type_path.segments.iter();
+            if let Some(is_message) = Self::match_with_message_inner_type(
+                import0,
+                self.package.as_ref().map(|p| &p.package),
+                container,
+                &mut type_name_iter,
+                &mut typ.complete_path,
+            )? {
+                typ.target_is_message = is_message;
+                return Ok(());
+            }
+        }
+        // search in proto
+        if let Some(t) = self.types.get(type_path_seg_first) {
+            match t {
+                InsideType::Message(hierarchy) => {
+                    if typ.type_path.segments.len() > 1 {
+                        if let Some(is_message) = Self::match_with_message_inner_type(
+                            import0,
+                            self.package.as_ref().map(|p| &p.package),
+                            hierarchy,
+                            &mut typ.type_path.segments.iter().skip(1),
+                            &mut typ.complete_path,
+                        )? {
+                            typ.target_is_message = is_message;
+                            return Ok(());
                         }
+                    } else {
+                        typ.complete_path.push_import_with_scope(
+                            import0,
+                            self.package.as_ref().map(|p| &p.package),
+                        );
+                        typ.complete_path.push(type_path_seg_first);
+                        typ.target_is_message = true;
+                        return Ok(());
+                    }
+                }
+                InsideType::Enum(e) => {
+                    if typ.type_path.segments.len() > 1 {
+                        typ.type_path
+                            .span()
+                            .to_syn_error("cannot find this type in inner enumeration")
+                            .to_err()?;
+                    } else {
+                        typ.complete_path.push_import_with_scope(
+                            import0,
+                            self.package.as_ref().map(|p| &p.package),
+                        );
+                        typ.complete_path.push(e);
+                        typ.target_is_message = false;
+                        return Ok(());
                     }
                 }
             }
-            // resolve in same file
-            self.lookup_in_self(typ_path, &mut typ_path.segments.iter().enumerate())
-                .map(|r| r.map(|x| ResolvedType::External(x)))
+        }
+        // search in import-wide
+        let type_path_first_str = type_path_seg_first.to_string();
+        let try_package_name = type_path_seg_first.clone();
+        if if type_path_first_str.is_case(Case::UpperCamel) {
+            // try search default scope first
+            self.match_with_external_type(None, typ)?
+                || self.match_with_external_type(Some(&try_package_name), typ)?
+        } else {
+            self.match_with_external_type(Some(&try_package_name), typ)?
+                || self.match_with_external_type(None, typ)?
+        } {
+            return Ok(());
+        }
+
+        typ.type_path
+            .span()
+            .to_syn_error(&format!(
+                "no such type '{}'",
+                typ.type_path
+                    .segments
+                    .iter()
+                    .map(|s| s.to_string())
+                    .collect::<Vec<_>>()
+                    .join(".")
+            ))
+            .to_err()
+    }
+
+    pub fn resolve_field_type(
+        &self,
+        parent: Option<&MessageHierarchy>,
+        typ: &mut FieldType,
+    ) -> syn::Result<()> {
+        match typ {
+            FieldType::MessageOrEnum(typ) => self.resolve_type(parent, typ),
+            FieldType::Map(map) => {
+                if let Some(err) = (
+                    self.resolve_field_type(parent, map.key.as_mut()),
+                    self.resolve_field_type(parent, map.value.as_mut()),
+                )
+                    .join_errors()
+                {
+                    err.to_err()
+                } else {
+                    Ok(())
+                }
+            }
+            _ => Ok(()),
         }
     }
 
-    fn lookup_in_self<'a>(
-        &mut self,
-        typ_path: &ProtobufPath,
-        iter: &'a mut impl Iterator<Item = (usize, &'a Ident)>,
-    ) -> syn::Result<Option<ExternalType>> {
-        let types = scan_types(typ_path.span(), &self.call_path)?;
-        let t = Self::lookup_in_types(
-            typ_path.span(),
-            &self.call_path,
-            &types,
-            iter,
-            typ_path.segments.len() - 1,
-            vec![],
-        )?;
-        self.cache.insert(self.call_path.clone(), types);
-        Ok(t)
-    }
-
-    fn lookup<'a>(
-        &mut self,
-        error_span: Span,
-        mut path: PathBuf,
-        iter: &'a mut impl Iterator<Item = (usize, &'a Ident)>,
-        last_seg_number: usize,
-    ) -> syn::Result<Option<ExternalType>> {
-        while let Some((_, seg)) = iter.next() {
-            let p = path.join(seg.to_string());
-            if p.exists() {
-                // mod exists
-                path = p;
-                continue;
-            }
-            let p = path.join(format!("{}.rs", seg.to_string()));
-
-            if p.eq(&self.call_path) {
-                // in same file
-            }
-
-            if p.exists() {
-                let mut segments = if let Ok(rel) = p.strip_prefix(&self.src_dir) {
-                    rel.iter()
-                        .filter_map(|s| {
-                            let s = s.to_string_lossy();
-                            if s.ends_with(".rs") {
-                                // should be the last
-                                if s.eq("mod.rs") || s.eq("lib.rs") {
-                                    None
-                                } else {
-                                    Some(s.trim_end_matches(".rs").to_owned())
-                                }
-                            } else {
-                                Some(s.to_string())
-                            }
-                        })
-                        .collect::<Vec<_>>()
+    fn match_with_message_inner_type<'a>(
+        import0: &Import,
+        package: Option<&Ident>,
+        hierarchy: &'a MessageHierarchy,
+        type_name_iter: &mut impl Iterator<Item = &'a Ident>,
+        full_type_path: &mut syn::Path,
+    ) -> syn::Result<Option<bool>> {
+        if let Some(type_name_seg) = type_name_iter.next() {
+            if let Some(msg) = hierarchy.find_message(type_name_seg) {
+                if type_name_iter.count() == 0 {
+                    full_type_path.push_import_with_scope(import0, package);
+                    full_type_path.push_type_vec(&msg.name, false);
+                    return Ok(Some(true));
+                }
+                Self::match_with_message_inner_type(
+                    import0,
+                    package,
+                    msg,
+                    type_name_iter,
+                    full_type_path,
+                )
+            } else if let Some(enum_name) = hierarchy.find_enum(type_name_seg) {
+                if type_name_iter.count() == 0 {
+                    full_type_path.push_import_with_scope(import0, package);
+                    full_type_path.push_type_vec(&hierarchy.name, true);
+                    full_type_path.push(enum_name);
+                    Ok(Some(false))
                 } else {
-                    vec![]
-                };
-
-                segments.insert(0, "crate".to_owned());
-                if let Some(types) = self.cache.get(&p) {
-                    return Self::lookup_in_types(
-                        error_span,
-                        &p,
-                        types,
-                        iter,
-                        last_seg_number,
-                        segments,
-                    );
-                } else {
-                    let types = scan_types(error_span, &p)?;
-                    let result = Self::lookup_in_types(
-                        error_span,
-                        &p,
-                        &types,
-                        iter,
-                        last_seg_number,
-                        segments,
-                    );
-                    self.cache.insert(p, types);
-                    return result;
+                    // cannot find more types in enumeration
+                    type_name_seg
+                        .to_syn_error("cannot find this type in inner enumeration")
+                        .to_err()
                 }
             } else {
-                Err(syn::Error::new(error_span, "no such type"))?;
-            }
-        }
-        Ok(None)
-    }
-    fn lookup_in_types<'a>(
-        error_span: Span,
-        path: impl AsRef<Path>,
-        types: &HashMap<String, PbTypes>,
-        iter: &'a mut impl Iterator<Item = (usize, &'a Ident)>,
-        last_seg_number: usize,
-        mut segments: Vec<String>,
-    ) -> syn::Result<Option<ExternalType>> {
-        if let Some((index, mut name)) = iter.next() {
-            let mut package_name = "".to_owned();
-            if let Some(elements) = if index == last_seg_number {
-                types.get("")
-            } else {
-                package_name = name.to_string();
-                if let Some((index, n)) = iter.next() {
-                    if index != last_seg_number {
-                        return Err(syn::Error::new(
-                            error_span,
-                            &format!("cannot lookup inner types yet in {:?}", path.as_ref()),
-                        ));
-                    }
-                    name = n;
-                    segments.push(package_name.clone());
-                    types.get(&package_name)
-                } else {
-                    unreachable!()
-                }
-            } {
-                let ty_name = name.to_string();
-                segments.push(ty_name.clone());
-                if elements.messages.contains(&ty_name) {
-                    Ok(Some(ExternalType {
-                        source_path: path.as_ref().to_path_buf(),
-                        package: package_name,
-                        type_name: ty_name,
-                        is_message: true,
-                        type_path_segments: segments,
-                    }))
-                } else if elements.enums.contains(&ty_name) {
-                    Ok(Some(ExternalType {
-                        source_path: path.as_ref().to_path_buf(),
-                        package: package_name,
-                        type_name: ty_name,
-                        is_message: true,
-                        type_path_segments: segments,
-                    }))
-                } else {
-                    Err(syn::Error::new(error_span, "no such type"))
-                }
-            } else if index == last_seg_number {
-                Err(syn::Error::new(error_span, &{
-                    let candidates = types
-                        .keys()
-                        .filter_map(|k| {
-                            if k.is_empty() {
-                                None
-                            } else {
-                                Some(k.to_owned())
-                            }
-                        })
-                        .collect::<Vec<_>>()
-                        .join(",");
-                    format!(
-                        "no such type in {:?}, you can try with package name: {}",
-                        path.as_ref(),
-                        candidates
-                    )
-                }))
-            } else {
+                // cannot find this inner type in message
                 Ok(None)
             }
         } else {
-            Err(syn::Error::new(error_span, "missing type name"))
+            // unreachable
+            Ok(None)
         }
     }
-}
 
-#[derive(Default, Debug)]
-struct PbTypes {
-    _scope: String,
-    messages: HashSet<String>,
-    enums: HashSet<String>,
-}
-
-fn scan_types(
-    span: proc_macro2::Span,
-    source_file_path: impl AsRef<Path>,
-) -> syn::Result<HashMap<String, PbTypes>> {
-    let contents = fs::read_to_string(source_file_path.as_ref()).map_err(|err| {
-        syn::Error::new(
-            span,
-            format!(
-                "cannot read source file: {:?}({err})",
-                source_file_path.as_ref()
-            ),
-        )
-    })?;
-    let mut source = contents.as_str();
-    let mut default_scope = PbTypes::default();
-    let mut scopes = HashMap::new();
-    while !source.is_empty() {
-        if let Some(macro_pos) = source.find("protobuf!") {
-            if macro_pos > 0 {
-                let before = source.split_at(macro_pos).0;
-                if let Some(nl) = before.rfind("\n") {
-                    // check is commented to this macro
-                    if before.split_at(nl).1.contains("//") {
-                        // has comment before protobuf!
-                        continue;
-                    }
-                }
-            }
-            source = source.split_at(macro_pos + 10).1;
-        } else {
-            break;
-        }
-
-        if let Ok((rest, (package, types))) = fast_pb_parser::pb_proto(source) {
-            source = rest;
-            let messages = types.iter().filter_map(|t| {
-                if let fast_pb_parser::Element::Message(m) = t {
-                    Some(if m.suffix.is_empty() {
-                        m.name.to_owned()
-                    } else {
-                        format!("{}{}", m.name.to_case(Case::UpperCamel), m.suffix)
-                    })
+    fn match_with_external_type(
+        &self,
+        package: Option<&Ident>,
+        typ: &mut Type,
+    ) -> syn::Result<bool> {
+        let skip = if package.is_some() { 1 } else { 0 };
+        if let Some(scope) = self
+            .deps
+            .scopes
+            .get(&package.map(|p| p.to_string()).unwrap_or_default())
+        {
+            let type_path_str = typ
+                .type_path
+                .segments
+                .iter()
+                .skip(skip)
+                .map(|s| s.to_string())
+                .collect::<Vec<_>>()
+                .join(".");
+            if let Some(x) = scope.get(&type_path_str) {
+                if x.prost_type {
+                    let mut type_name_iter = typ.type_path.segments.iter().skip(2);
+                    let type_name = typ.type_path.segments.last().unwrap();
+                    typ.complete_path
+                        .push(&("prost", type_name.span()).to_ident());
+                    typ.complete_path.push_type_path(&mut type_name_iter, false);
                 } else {
-                    None
+                    typ.complete_path
+                        .push_import_with_scope(self.imports.get(x.import_index).unwrap(), package)
+                        .push_type_path(&mut typ.type_path.segments.iter().skip(skip), false);
                 }
-            });
-            let enums = types.iter().filter_map(|t| {
-                if let fast_pb_parser::Element::Enum(e) = t {
-                    Some(e.name.to_owned())
-                } else {
-                    None
-                }
-            });
-            if let Some(package) = package {
-                scopes.insert(
-                    package.to_owned(),
-                    PbTypes {
-                        _scope: package.to_owned(),
-                        messages: messages.collect(),
-                        enums: enums.collect(),
-                    },
-                );
-            } else {
-                default_scope.messages.extend(messages);
-                default_scope.enums.extend(enums);
+                return Ok(true);
             }
-        } else {
-            // broken but can still parse next protobuf!
         }
+        Ok(false)
     }
-    scopes.insert("".to_owned(), default_scope);
-    Ok(scopes)
 }
 
-mod fast_pb_parser {
-    use nom::{
-        branch::alt,
-        bytes::complete::{is_not, tag, take_until, take_while1},
-        character::{complete::digit1, is_newline},
-        combinator::{map, opt},
-        multi::{many0, separated_list1},
-        sequence::{delimited, preceded, terminated, tuple},
-        IResult,
-    };
+pub trait PathMod {
+    fn new() -> Self;
+    fn push(&mut self, type_name_seg: &Ident) -> &mut Self;
+    fn push_import_with_scope(&mut self, import: &Import, package: Option<&Ident>) -> &mut Self;
+    fn push_type_path<'a>(
+        &mut self,
+        iter: &mut impl Iterator<Item = &'a Ident>,
+        tailing: bool,
+    ) -> &mut Self;
+    fn push_type_vec(&mut self, name: &Vec<Ident>, tailing: bool) -> &mut Self;
+}
 
-    #[derive(Debug, PartialEq)]
-    pub enum Element<'a> {
-        Message(Message<'a>),
-        Enum(Enum<'a>),
+impl PathMod for syn::Path {
+    fn new() -> Self {
+        Self {
+            leading_colon: None,
+            segments: Punctuated::new(),
+        }
     }
 
-    fn line_comment(input: &str) -> IResult<&str, ()> {
-        let (rest, _) = tag("//")(input)?;
-        if let Some(c) = rest.chars().nth(0) {
-            if is_newline(c as u8) {
-                Ok((rest, ()))
+    fn push(&mut self, type_name_seg: &Ident) -> &mut Self {
+        self.segments.push(PathSegment {
+            ident: type_name_seg.clone(),
+            arguments: syn::PathArguments::None,
+        });
+        self
+    }
+
+    fn push_import_with_scope(&mut self, import: &Import, package: Option<&Ident>) -> &mut Self {
+        if let Some(file_path) = &import.file_path {
+            for seg in file_path.mod_path.segments.iter() {
+                self.segments.push(seg.clone());
+            }
+        }
+        if let Some(package) = package {
+            self.push(package);
+        }
+        self
+    }
+
+    fn push_type_path<'a>(
+        &mut self,
+        iter: &mut impl Iterator<Item = &'a Ident>,
+        tailing: bool,
+    ) -> &mut Self {
+        while let Some(seg) = iter.next() {
+            if tailing || iter.count() > 0 {
+                self.push(&seg.to_ident_with_case(Case::Snake));
             } else {
-                map(is_not("\n\r"), |_| ())(rest)
+                self.push(seg);
             }
-        } else {
-            Ok((rest, ()))
         }
+        self
     }
-
-    fn block_commnet(input: &str) -> IResult<&str, ()> {
-        map(delimited(tag("/*"), take_until("*/"), tag("*/")), |_| ())(input)
-    }
-
-    fn ws(input: &str) -> IResult<&str, ()> {
-        map(
-            many0(alt((
-                map(take_while1(|c: char| c.is_whitespace()), |_| ()),
-                line_comment,
-                block_commnet,
-            ))),
-            |_| (),
-        )(input)
-    }
-
-    macro_rules! tag_ws_around {
-        ($tag:expr) => {
-            tuple((ws, tag($tag), ws))
-        };
-        ($tag1:expr,$tag2:expr) => {
-            tuple((ws, tag($tag1), ws, tag($tag2), ws))
-        };
-    }
-
-    fn ident(input: &str) -> IResult<&str, &str> {
-        take_while1(|c: char| c.is_alphanumeric() || c == '_')(input)
-    }
-
-    pub fn pb_proto(input: &str) -> IResult<&str, (Option<&str>, Vec<Element>)> {
-        let mut package = None;
-        let (rest, elements) = delimited(
-            tag_ws_around!("{"),
-            map(many0(pb_decl), |result| {
-                result
-                    .into_iter()
-                    .map(|(p, r)| {
-                        if p.is_some() {
-                            package = p;
-                        }
-                        r
-                    })
-                    .flatten()
-                    .flatten()
-                    .collect::<Vec<_>>()
-            }),
-            tag_ws_around!("}"),
-        )(input)?;
-        Ok((rest, (package, elements)))
-    }
-
-    fn pb_decl(input: &str) -> IResult<&str, (Option<&str>, Option<Vec<Element>>)> {
-        let (rest, _) = ws(input)?;
-        let (_, next) = alt((
-            tag("message"),
-            tag("enum"),
-            tag("option"),
-            tag("import"),
-            tag("service"),
-            tag("syntax"),
-            tag("package"),
-        ))(rest)?;
-        let mut package = None;
-        match next {
-            "message" => map(pb_message, |m| Some(vec![Element::Message(m)]))(rest),
-            "enum" => map(pb_enum, |e| Some(vec![Element::Enum(e)]))(rest),
-            "option" => map(pb_option, |_| None)(rest),
-            "import" => map(pb_import, |_| None)(rest),
-            "service" => map(pb_service, |messages| {
-                Some(
-                    messages
-                        .into_iter()
-                        .map(|m| Element::Message(m))
-                        .collect::<Vec<_>>(),
-                )
-            })(rest),
-            "syntax" => map(pb_syntax, |_| None)(rest),
-            "package" => map(pb_package, |name| {
-                package = Some(name);
-                None
-            })(rest),
-            _ => unreachable!(),
-        }
-        .map(|(rest, result)| (rest, (package, result)))
-    }
-
-    fn pb_syntax(input: &str) -> IResult<&str, &str> {
-        delimited(
-            tag_ws_around!("syntax", "="),
-            delimited(tag("\""), ident, tag("\"")),
-            tag_ws_around!(";"),
-        )(input)
-    }
-
-    fn pb_import(input: &str) -> IResult<&str, &str> {
-        delimited(
-            tag_ws_around!("import"),
-            delimited(tag("\""), take_until("\""), tag("\"")),
-            tag_ws_around!(";"),
-        )(input)
-    }
-
-    fn pb_option(input: &str) -> IResult<&str, ()> {
-        map(
-            tuple((
-                tag_ws_around!("option"),
-                take_while1(|c: char| c != ';'),
-                tag_ws_around!(";"),
-            )),
-            |_| (),
-        )(input)
-    }
-
-    fn pb_package(input: &str) -> IResult<&str, &str> {
-        delimited(tag_ws_around!("package"), ident, tag_ws_around!(";"))(input)
-    }
-
-    fn pb_service(input: &str) -> IResult<&str, Vec<Message>> {
-        let (rest, _name) =
-            delimited(tag_ws_around!("service"), ident, tag_ws_around!("{"))(input)?;
-        terminated(
-            map(many0(pb_rpc), |messages| {
-                messages
-                    .into_iter()
-                    .map(|rpc| match (rpc.gen_request, rpc.gen_response) {
-                        (None, None) => vec![],
-                        (None, Some((name, suffix, inner_types))) => vec![Message {
-                            name,
-                            suffix,
-                            inner_types,
-                        }],
-                        (Some((name, suffix, inner_types)), None) => {
-                            vec![Message {
-                                name,
-                                suffix,
-                                inner_types,
-                            }]
-                        }
-                        (Some(r), Some(p)) => vec![
-                            Message {
-                                name: r.0,
-                                suffix: r.1,
-                                inner_types: r.2,
-                            },
-                            Message {
-                                name: p.0,
-                                suffix: p.1,
-                                inner_types: p.2,
-                            },
-                        ],
-                    })
-                    .flatten()
-                    .collect()
-            }),
-            tag_ws_around!("}"),
-        )(rest)
-    }
-
-    struct Rpc<'a> {
-        gen_request: Option<(&'a str, &'static str, Vec<Element<'a>>)>,
-        gen_response: Option<(&'a str, &'static str, Vec<Element<'a>>)>,
-    }
-
-    fn pb_rpc(input: &str) -> IResult<&str, Rpc> {
-        let (rest, _) = tag_ws_around!("rpc")(input)?;
-        let (rest, rpc_name) = ident(rest)?;
-        let (rest, gen_request) = delimited(
-            tag_ws_around!("("),
-            preceded(
-                opt(tag_ws_around!("stream")),
-                alt((
-                    map(pb_message_body, |inner_types| {
-                        Some((rpc_name, "Request", inner_types))
-                    }),
-                    map(tuple((ident, pb_message_body)), |(name, types)| {
-                        Some((name, "", types))
-                    }),
-                    map(ident, |_| None),
-                )),
-            ),
-            tag_ws_around!(")"),
-        )(rest)?;
-        let (rest, _) = tag_ws_around!("returns")(rest)?;
-        let (rest, gen_response) = delimited(
-            tag_ws_around!("("),
-            preceded(
-                opt(tag_ws_around!("stream")),
-                alt((
-                    map(pb_message_body, |inner_types| {
-                        Some((rpc_name, "Response", inner_types))
-                    }),
-                    map(tuple((ident, pb_message_body)), |(name, inner_types)| {
-                        Some((name, "", inner_types))
-                    }),
-                    map(ident, |_| None),
-                )),
-            ),
-            tag_ws_around!(")"),
-        )(rest)?;
-        // rpc options
-        let (rest, _) = opt(tuple((
-            tag_ws_around!("{"),
-            many0(tuple((pb_option, opt(tag_ws_around!(";"))))),
-            tag_ws_around!("}"),
-        )))(rest)?;
-        let (rest, _) = opt(tag_ws_around!(";"))(rest)?;
-        Ok((
-            rest,
-            Rpc {
-                gen_request,
-                gen_response,
-            },
-        ))
-    }
-
-    fn pb_message_body(input: &str) -> IResult<&str, Vec<Element>> {
-        map(
-            delimited(
-                tag_ws_around!("{"),
-                many0(alt((
-                    map(pb_reserved, |_| None),
-                    map(pb_extend, |_| None),
-                    map(pb_message, |m| Some(Element::Message(m))),
-                    map(pb_enum, |e| Some(Element::Enum(e))),
-                    map(pb_field, |_| None),
-                ))),
-                tag_ws_around!("}"),
-            ),
-            |results| results.into_iter().flatten().collect::<Vec<_>>(),
-        )(input)
-    }
-
-    fn pb_path(input: &str) -> IResult<&str, ()> {
-        separated_list1(tag("."), ident)(input).map(|(rest, _)| (rest, ()))
-    }
-
-    fn pb_extend(input: &str) -> IResult<&str, ()> {
-        let (rest, _) = tuple((ws, tag("extend"), ws, pb_path))(input)?;
-        pb_message_body(rest).map(|(rest, _)| (rest, ()))
-    }
-
-    fn pb_reserved(input: &str) -> IResult<&str, ()> {
-        preceded(
-            tag_ws_around!("reserved"),
-            map(
-                many0(terminated(
-                    alt((
-                        map(digit1, |_| ()),
-                        map(tuple((digit1, ws, tag("to"), ws, digit1)), |_| ()),
-                        map(delimited(tag("\""), ident, tag("\"")), |_| ()),
-                    )),
-                    opt(tag_ws_around!(";")),
-                )),
-                |_| (),
-            ),
-        )(input)
-    }
-
-    fn pb_field(input: &str) -> IResult<&str, ()> {
-        let (rest, _) = alt((
-            map(tuple((tag_ws_around!("group"), pb_message_body)), |_| ()),
-            map(
-                tuple((
-                    tag_ws_around!("map", "<"),
-                    pb_path,
-                    tag_ws_around!(","),
-                    pb_path,
-                    tag_ws_around!(">"),
-                    ident,
-                    ws,
-                    opt(tuple((tag_ws_around!("="), digit1, ws))),
-                    opt(tuple((tag("["), is_not("]"), tag("]"), ws))),
-                )),
-                |_| (),
-            ),
-            map(
-                tuple((tag_ws_around!("oneof"), ident, ws, pb_message_body)),
-                |_| (),
-            ),
-            map(
-                tuple((
-                    ws,
-                    opt(tag("repeated")),
-                    ws,
-                    pb_path,
-                    ws,
-                    ident,
-                    ws,
-                    opt(tuple((tag_ws_around!("="), digit1, ws))),
-                    opt(tuple((tag("["), is_not("]"), tag("]"), ws))),
-                )),
-                |_| (),
-            ),
-        ))(input)?;
-        let (rest, _) = opt(tag_ws_around!(";"))(rest)?;
-        Ok((rest, ()))
-    }
-
-    #[derive(Debug, PartialEq)]
-    pub struct Message<'a> {
-        pub name: &'a str,
-        pub suffix: &'static str,
-        pub inner_types: Vec<Element<'a>>,
-    }
-
-    fn pb_message(input: &str) -> IResult<&str, Message> {
-        let (rest, message_name) = delimited(tag_ws_around!("message"), ident, ws)(input)?;
-        let (rest, inner_types) = pb_message_body(rest)?;
-        Ok((
-            rest,
-            Message {
-                name: message_name,
-                suffix: "",
-                inner_types,
-            },
-        ))
-    }
-
-    #[derive(Debug, PartialEq)]
-    pub struct Enum<'a> {
-        pub name: &'a str,
-    }
-
-    fn pb_enum(input: &str) -> IResult<&str, Enum> {
-        map(
-            delimited(
-                tag_ws_around!("enum"),
-                ident,
-                tuple((
-                    ws,
-                    tag("{"),
-                    ws,
-                    many0(tuple((
-                        alt((
-                            pb_reserved,
-                            pb_option,
-                            map(
-                                tuple((
-                                    ident,
-                                    opt(tuple((tag_ws_around!("="), digit1, ws))),
-                                    opt(tuple((tag("["), is_not("]"), tag("]"), ws))),
-                                    ws,
-                                )),
-                                |_| (),
-                            ),
-                        )),
-                        opt(tag_ws_around!(";")),
-                    ))),
-                    tag("}"),
-                    ws,
-                )),
-            ),
-            |name| Enum { name },
-        )(input)
-    }
-
-    #[cfg(test)]
-    mod test_fast_pb_parser {
-        use crate::resolve::fast_pb_parser::{self, Element, Message};
-
-        fn test_parser(
-            pb_text: &str,
-            expected_package: Option<&str>,
-            expected_elements: Vec<Element>,
-        ) {
-            let (rest, (package, result)) = fast_pb_parser::pb_proto(pb_text).unwrap();
-            if let Some(pos) = pb_text.rfind("}") {
-                assert_eq!(
-                    rest,
-                    pb_text.split_at(pos + 1).1,
-                    "unexpected rest text: {rest}"
-                );
-            }
-            assert!(
-                package.eq(&expected_package),
-                "unexpected package {:#?}",
-                package
-            );
-            assert!(
-                result.eq(&expected_elements),
-                "unexpected result {:#?}",
-                result
-            );
-        }
-
-        #[test]
-        fn test_parse_protocol() {
-            test_parser(
-                r#"{
-                    message A {
-                        message AInner {
-                        }
-                    }
-                }"#,
-                None,
-                vec![Element::Message(Message {
-                    name: "A",
-                    suffix: "",
-                    inner_types: vec![Element::Message(Message {
-                        name: "AInner",
-                        suffix: "",
-                        inner_types: vec![],
-                    })],
-                })],
-            );
-
-            test_parser(
-                r#"{
-                    package abc;
-                    service SomeService {
-                        rpc hello({
-                            string name
-                            message ReqInner {
-                            }
-                        }) returns({
-                            string words
-                        })
-                    }
-                }"#,
-                Some("abc"),
-                vec![
-                    Element::Message(Message {
-                        name: "hello",
-                        suffix: "Request",
-                        inner_types: vec![Element::Message(Message {
-                            name: "ReqInner",
-                            suffix: "",
-                            inner_types: vec![],
-                        })],
-                    }),
-                    Element::Message(Message {
-                        name: "hello",
-                        suffix: "Response",
-                        inner_types: vec![],
-                    }),
-                ],
-            );
-        }
+    fn push_type_vec(&mut self, name: &Vec<Ident>, tailing: bool) -> &mut Self {
+        self.push_type_path(&mut name.iter(), tailing)
     }
 }
