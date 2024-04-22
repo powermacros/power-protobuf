@@ -31,7 +31,11 @@ use crate::{
 };
 
 impl Protocol {
-    pub fn parse_from_call_site(input: ParseStream, call_site_path: PathBuf) -> syn::Result<Self> {
+    pub fn parse_from_call_site<BeforeCheck: Fn(&mut Protocol) -> syn::Result<()>>(
+        input: ParseStream,
+        call_site_path: PathBuf,
+        before_check: BeforeCheck,
+    ) -> syn::Result<Self> {
         let syntax: Syntax = input.parse()?;
         let mut protocol = Self {
             imports: vec![Import::call_site(&call_site_path)?],
@@ -113,6 +117,8 @@ impl Protocol {
         }
 
         protocol.syntax = syntax;
+        before_check(&mut protocol)?;
+
         for (import_index, import) in protocol.imports.iter().enumerate() {
             protocol.deps.scan(import_index, import)?;
         }

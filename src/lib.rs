@@ -1,7 +1,6 @@
 #![doc = include_str!("../README.md")]
 #![feature(proc_macro_span)]
 
-use model::Protocol;
 use power_protobuf_lib::Protocol;
 use quote::ToTokens;
 use syn::parse::Parse;
@@ -14,7 +13,9 @@ impl Parse for ProtobufMacro {
     fn parse(input: syn::parse::ParseStream) -> syn::Result<Self> {
         let span = proc_macro::Span::call_site();
         Ok(Self {
-            inner: Protocol::parse_from_call_site(input, span.source_file().path())?,
+            inner: Protocol::parse_from_call_site(input, span.source_file().path(), |_protocol| {
+                Ok(())
+            })?,
         })
     }
 }
