@@ -314,7 +314,7 @@ pub struct EnumValue {
     pub tag: Option<LitInt>,
     pub tag_value: i32,
     /// enum value options
-    pub options: Option<Punctuated<ProtobufOption, Token![,]>>,
+    pub options: Option<Vec<ProtobufOption>>,
 }
 
 /// A protobuf enumerator

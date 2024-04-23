@@ -1104,7 +1104,17 @@ impl Field {
             let name = input.parse_as_ident()?;
             let tag = TagValue::parse(input, name.span())?;
             let mut options = vec![];
-            if input.peek(token::Bracket) {
+            if input.peek(token::Brace) {
+                let inner: ParseBuffer;
+                syn::braced!(inner in input);
+                while !inner.is_empty() {
+                    if inner.peek(Token![;]) {
+                        inner.parse::<Token![;]>()?;
+                        continue;
+                    }
+                    options.push(inner.parse()?);
+                }
+            } else if input.peek(token::Bracket) {
                 let inner: ParseBuffer;
                 syn::bracketed!(inner in input);
                 while !inner.is_empty() {
@@ -1381,7 +1391,21 @@ impl Parse for EnumValue {
         let options = if input.peek(token::Bracket) {
             let inner: ParseBuffer;
             syn::bracketed!(inner in input);
-            Some(inner.parse_terminated(ProtobufOption::parse_enum_option, Token![,])?)
+            Some(
+                inner
+                    .parse_terminated(ProtobufOption::parse_enum_option, Token![;])?
+                    .into_iter()
+                    .collect(),
+            )
+        } else if input.peek(token::Brace) {
+            let inner: ParseBuffer;
+            syn::braced!(inner in input);
+            Some(
+                inner
+                    .parse_terminated(ProtobufOption::parse_enum_option, Token![;])?
+                    .into_iter()
+                    .collect(),
+            )
         } else {
             None
         };

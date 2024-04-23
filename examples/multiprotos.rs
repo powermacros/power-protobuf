@@ -24,78 +24,18 @@ protobuf! {
     }
 }
 
-// protobuf! {
-//     message MessageinAnotherScope {
-//         optional scope1.Message1 inner;
-//         X x;
-//     }
+protobuf! {
+    message MessageinAnotherScope {
+        optional scope1.Message1 inner;
+        Enumeration1 inner2;
+    }
 
-//     enum X {
-//       A;
-//       B;
-//       C;
-//       D;
-//     }
-// }
+    enum Enumeration1 {
+      A;
+      B;
+      C;
+      D;
+    }
+}
 
 fn main() {}
-#[allow(clippy::derive_partial_eq_without_eq)]
-#[derive(
-    Clone,
-    PartialEq,
-    prost :: Message,
-    serde :: Deserialize,
-    serde ::
-Serialize,
-)]
-pub struct MessageinAnotherScope {
-    #[prost(message, optional, tag = "1")]
-    pub inner: Option<crate::scope1::Message1>,
-    #[prost(enumeration = "X", tag = "2")]
-    pub x: i32,
-}
-#[derive(
-    Clone,
-    Copy,
-    Debug,
-    Eq,
-    PartialEq,
-    PartialOrd,
-    Ord,
-    Hash,
-    prost ::
-Enumeration,
-    serde :: Deserialize,
-    serde :: Serialize,
-)]
-#[repr(i32)]
-pub enum X {
-    A = 0,
-    B = 1,
-    C = 2,
-    D = 3,
-}
-impl X {
-    #[doc = r" String value of the enum field names used in the ProtoBuf definition."]
-    #[doc = r""]
-    #[doc = r" The values are not transformed in any way and thus are considered stable"]
-    #[doc = r"(if the ProtoBuf definition does not change) and safe for programmatic use."]
-    pub fn as_str_name(&self) -> &'static str {
-        match self {
-            Self::A => "A",
-            Self::B => "B",
-            Self::C => "C",
-            Self::D => "D",
-        }
-    }
-    #[doc = r" Creates an enum from field names used in the ProtoBuf definition."]
-    pub fn from_str_name(value: &str) -> Option<Self> {
-        match value {
-            "A" => Some(Self::A),
-            "B" => Some(Self::B),
-            "C" => Some(Self::C),
-            "D" => Some(Self::D),
-            _ => None,
-        }
-    }
-}
