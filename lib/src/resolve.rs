@@ -252,7 +252,8 @@ impl ResolveContext<'_> {
     ) -> syn::Result<Option<bool>> {
         if let Some(type_name_seg) = type_name_iter.next() {
             if let Some(msg) = hierarchy.find_message(type_name_seg) {
-                if type_name_iter.count() == 0 {
+                let (left, _) = type_name_iter.size_hint();
+                if left == 0 {
                     full_type_path.push_import_with_scope(import0, package);
                     full_type_path.push_type_vec(&msg.name, false);
                     return Ok(Some(true));
@@ -265,7 +266,8 @@ impl ResolveContext<'_> {
                     full_type_path,
                 )
             } else if let Some(enum_name) = hierarchy.find_enum(type_name_seg) {
-                if type_name_iter.count() == 0 {
+                let (left, _) = type_name_iter.size_hint();
+                if left == 0 {
                     full_type_path.push_import_with_scope(import0, package);
                     full_type_path.push_type_vec(&hierarchy.name, true);
                     full_type_path.push(enum_name);
@@ -463,7 +465,8 @@ impl PathMod for syn::Path {
         tailing: bool,
     ) -> &mut Self {
         while let Some(seg) = iter.next() {
-            if tailing || iter.count() > 0 {
+            let (left, _) = iter.size_hint();
+            if tailing || left > 0 {
                 self.push(&seg.to_ident_with_case(Case::Snake));
             } else {
                 self.push(seg);
