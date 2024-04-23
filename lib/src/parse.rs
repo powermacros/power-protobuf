@@ -933,7 +933,8 @@ impl MessageBody {
                         }
                         if tag_used.contains_key(&next_tag) {
                             next_tag += 1;
-                            continue;
+                        } else {
+                            break;
                         }
                     }
                     tag_used.insert(next_tag, field.field_name.span());
