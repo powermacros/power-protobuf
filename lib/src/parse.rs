@@ -1,9 +1,4 @@
-use std::{
-    collections::HashMap,
-    ops::RangeInclusive,
-    path::{Path, PathBuf},
-    str::FromStr,
-};
+use std::{collections::HashMap, ops::RangeInclusive, path::PathBuf};
 
 use convert_case::Case;
 use proc_macro2::Span;
@@ -13,19 +8,18 @@ use syn::{
     token, Ident, LitBool, LitInt, LitStr, Token,
 };
 use syn_prelude::{
-    AmmendSynError, JoinSynErrors, ParseAsIdent, ToErr, ToIdent, ToIdentWithCase, ToLitStr,
-    ToSynError, TryParseAsIdent, TryParseOneOfIdents, WithPrefix, WithSuffix,
+    AmmendSynError, JoinSynErrors, ParseAsIdent, ToErr, ToIdentWithCase, ToLitStr, ToSynError,
+    TryParseAsIdent, TryParseOneOfIdents, WithPrefix, WithSuffix,
 };
 
 use crate::{
     dep::Deps,
     model::{
-        AnyTypeUrl, DeclIndex, EnumValue, Enumeration, Extension, Field, FieldType, FilePath,
-        Group, Import, ImportVis, MapType, Message, MessageElement, Method, Modifier,
-        NestedTypeIndex, OneOf, Package, ProtobufConstant, ProtobufConstantMessage,
-        ProtobufConstantMessageFieldName, ProtobufOption, ProtobufOptionName,
-        ProtobufOptionNameExt, ProtobufOptionNamePart, ProtobufPath, Protocol, Service, Syntax,
-        TagValue, Type,
+        AnyTypeUrl, DeclIndex, EnumValue, Enumeration, Extension, Field, FieldType, Group, Import,
+        ImportVis, MapType, Message, MessageElement, Method, Modifier, NestedTypeIndex, OneOf,
+        Package, ProtobufConstant, ProtobufConstantMessage, ProtobufConstantMessageFieldName,
+        ProtobufOption, ProtobufOptionName, ProtobufOptionNameExt, ProtobufOptionNamePart,
+        ProtobufPath, Protocol, Service, Syntax, TagValue, Type,
     },
     resolve::{InsideType, PathMod, ResolveContext},
 };
@@ -151,20 +145,17 @@ impl Protocol {
             imports: &protocol.imports,
         };
 
-        if let Some(err) = protocol
+        let check_result1 = protocol
             .messages
             .iter_mut()
             .map(|m| m.resolve(&ctx))
             .collect::<Vec<syn::Result<_>>>()
-            .join_errors()
-        {
-            return Err(err);
-        }
+            .join_errors();
 
-        match protocol
+        let check_result2 = protocol
             .services
             .iter_mut()
-            .filter_map(|s| {
+            .map(|s| {
                 s.methods
                     .iter_mut()
                     .map(|m| {
@@ -182,11 +173,9 @@ impl Protocol {
                     .join_errors()
             })
             .collect::<Vec<_>>()
-            .join_errors()
-        {
-            Some(err) => return err.to_err(),
-            None => {}
-        };
+            .join_errors();
+
+        (check_result1, check_result2).join_errors()?;
 
         Ok(protocol)
     }

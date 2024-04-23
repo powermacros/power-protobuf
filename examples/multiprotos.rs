@@ -26,7 +26,7 @@ protobuf! {
 
 protobuf! {
     message MessageinAnotherScope {
-        scope1.Message1 inner;
+        optional scope1.Message1 inner;
     }
 }
 

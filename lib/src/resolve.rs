@@ -43,7 +43,7 @@ impl Message {
         ctx: &ResolveContext,
         hierarchy: &MessageHierarchy,
     ) -> syn::Result<()> {
-        let mut err = self
+        let result = self
             .messages
             .iter_mut()
             .enumerate()
@@ -55,36 +55,22 @@ impl Message {
             .collect::<Vec<_>>()
             .join_errors();
 
-        if let Some(err2) = self
+        let result2 = self
             .fields
             .iter_mut()
             .map(|f| match f {
                 MessageElement::Field(f) => ctx.resolve_field_type(Some(hierarchy), &mut f.typ),
-                MessageElement::OneOf(oneof) => match oneof
+                MessageElement::OneOf(oneof) => oneof
                     .fields
                     .iter_mut()
                     .map(|f| ctx.resolve_field_type(Some(hierarchy), &mut f.typ))
                     .collect::<Vec<syn::Result<_>>>()
-                    .join_errors()
-                {
-                    Some(err) => Err(err),
-                    None => Ok(()),
-                },
+                    .join_errors(),
             })
             .collect::<Vec<syn::Result<_>>>()
-            .join_errors()
-        {
-            if let Some(err) = &mut err {
-                err.combine(err2);
-            } else {
-                err = Some(err2);
-            }
-        }
+            .join_errors();
 
-        match err {
-            Some(err) => Err(err),
-            None => Ok(()),
-        }
+        (result, result2).join_errors()
     }
 }
 
@@ -248,18 +234,11 @@ impl ResolveContext<'_> {
     ) -> syn::Result<()> {
         match typ {
             FieldType::MessageOrEnum(typ) => self.resolve_type(parent, typ),
-            FieldType::Map(map) => {
-                if let Some(err) = (
-                    self.resolve_field_type(parent, map.key.as_mut()),
-                    self.resolve_field_type(parent, map.value.as_mut()),
-                )
-                    .join_errors()
-                {
-                    err.to_err()
-                } else {
-                    Ok(())
-                }
-            }
+            FieldType::Map(map) => (
+                self.resolve_field_type(parent, map.key.as_mut()),
+                self.resolve_field_type(parent, map.value.as_mut()),
+            )
+                .join_errors(),
             _ => Ok(()),
         }
     }
