@@ -1,4 +1,8 @@
-use std::{collections::HashMap, ops::RangeInclusive, path::PathBuf};
+use std::{
+    collections::{HashMap, HashSet},
+    ops::RangeInclusive,
+    path::PathBuf,
+};
 
 use convert_case::Case;
 use proc_macro2::Span;
@@ -1279,7 +1283,7 @@ impl Enumeration {
     ) -> syn::Result<Option<Self>> {
         if let Some(_) = input.try_parse_as_ident("enum", false) {
             let name = input.parse_as_ident()?;
-            let mut values = Vec::new();
+            let mut values: Vec<EnumValue> = Vec::new();
             let mut options = Vec::new();
             let mut reserved_nums = Vec::new();
             let mut reserved_names = Vec::new();
@@ -1303,6 +1307,42 @@ impl Enumeration {
                 values.push(inner.parse()?);
             }
 
+            let mut next_tag = 0;
+            let used_map = values.iter().map(|v| v.tag_value).collect::<HashSet<_>>();
+            for value in values.iter_mut() {
+                if value.tag_value >= 0 {
+                    for reserved in reserved_nums.iter() {
+                        if reserved.contains(&value.tag_value) {
+                            value
+                                .tag
+                                .as_ref()
+                                .unwrap()
+                                .span()
+                                .to_syn_error("tag number is reserved")
+                                .to_err()?;
+                        }
+                    }
+                    next_tag = value.tag_value;
+                } else {
+                    while next_tag < i32::MAX {
+                        for reserved in reserved_nums.iter() {
+                            if reserved.contains(&next_tag) {
+                                next_tag = reserved.end() + 1;
+                                continue;
+                            }
+                        }
+                        if used_map.contains(&next_tag) {
+                            next_tag += 1;
+                        } else {
+                            value.tag = Some(LitInt::new(&next_tag.to_string(), value.name.span()));
+                            value.tag_value = next_tag;
+                            next_tag += 1;
+                            break;
+                        }
+                    }
+                }
+            }
+
             Ok(Some(Self {
                 nested_mod_name: parent_name.map(|name| name.to_ident_with_case(Case::Snake)),
                 name,
@@ -1320,11 +1360,23 @@ impl Enumeration {
 impl Parse for EnumValue {
     fn parse(input: ParseStream) -> syn::Result<Self> {
         let name = input.parse_as_ident()?;
-        let tag = if input.peek(Token![=]) {
+        let (tag, tag_value) = if input.peek(Token![=]) {
             input.parse::<Token![=]>()?;
-            Some(input.parse::<LitInt>()?)
+            let tag_number = input.parse::<LitInt>()?;
+            let tag_value: i32 = tag_number.base10_parse().map_err(|err| {
+                tag_number
+                    .span()
+                    .to_syn_error(format!("illegal tag value: {err}"))
+            })?;
+            if tag_value < 0 {
+                tag_number
+                    .span()
+                    .to_syn_error("enumeration tag value should be >= 0")
+                    .to_err()?;
+            }
+            (Some(tag_number), tag_value)
         } else {
-            None
+            (None, -1)
         };
         let options = if input.peek(token::Bracket) {
             let inner: ParseBuffer;
@@ -1338,6 +1390,7 @@ impl Parse for EnumValue {
             variant_name: name.to_ident_with_case(Case::UpperCamel),
             name,
             tag,
+            tag_value,
             options,
         })
     }

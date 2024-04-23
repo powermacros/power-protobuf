@@ -312,6 +312,7 @@ pub struct EnumValue {
     pub proto_name: LitStr,
     /// enum value number
     pub tag: Option<LitInt>,
+    pub tag_value: i32,
     /// enum value options
     pub options: Option<Punctuated<ProtobufOption, Token![,]>>,
 }

@@ -662,7 +662,7 @@ impl Enumeration {
                 /// Creates an enum from field names used in the ProtoBuf definition.
                 pub fn from_str_name(value: &str) -> Option<Self> {
                     match value {
-                        #(#from_str_cases),*
+                        #(#from_str_cases,)*
                         _ => None,
                     }
                 }

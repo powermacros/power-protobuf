@@ -22,7 +22,7 @@ impl Parse for ProtobufMacro {
 
 impl ToTokens for ProtobufMacro {
     fn to_tokens(&self, tokens: &mut proc_macro2::TokenStream) {
-        self.inner.to_tokens(tokens)
+        self.inner.to_tokens(tokens);
     }
 }
 

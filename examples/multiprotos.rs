@@ -28,6 +28,13 @@ protobuf! {
     message MessageinAnotherScope {
         optional scope1.Message1 inner;
     }
+
+    enum X {
+      A;
+      B;
+      C;
+      D;
+    }
 }
 
 fn main() {}
