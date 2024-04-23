@@ -1104,6 +1104,10 @@ impl Field {
                 let inner: ParseBuffer;
                 syn::bracketed!(inner in input);
                 while !inner.is_empty() {
+                    if inner.peek(Token![;]) {
+                        inner.parse::<Token![;]>()?;
+                        continue;
+                    }
                     options.push(inner.parse()?);
                 }
             }
@@ -1296,7 +1300,7 @@ impl Enumeration {
                     options.push(ProtobufOption::continue_to_parse(&inner)?);
                     continue;
                 }
-                values.push(input.parse()?);
+                values.push(inner.parse()?);
             }
 
             Ok(Some(Self {
