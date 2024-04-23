@@ -549,7 +549,7 @@ impl Method {
             Type {
                 type_path: param_type,
                 target_is_message: true,
-                complete_path: syn::Path::new(),
+                ty: syn::Type::new(),
             },
             message,
         ))
@@ -1161,7 +1161,7 @@ impl Parse for FieldType {
             Ok(Self::MessageOrEnum(Type {
                 type_path,
                 target_is_message: true,
-                complete_path: syn::Path::new(),
+                ty: syn::Type::new(),
             }))
         }
     }

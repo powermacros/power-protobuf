@@ -225,7 +225,7 @@ impl FieldType {
 pub struct Type {
     pub type_path: ProtobufPath,
     pub target_is_message: bool,
-    pub complete_path: syn::Path,
+    pub ty: syn::Type,
 }
 
 #[derive(Debug, Clone)]

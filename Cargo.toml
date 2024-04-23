@@ -1,6 +1,6 @@
 [package]
 name = "power-protobuf"
-version = "0.1.5"
+version = "0.1.6"
 edition = "2021"
 description = "a proc-macro for embedding protobuf inside rust code"
 license = "MIT"
@@ -26,7 +26,7 @@ proc-macro = true
 syn = { version = "2", features = ["full", "extra-traits"] }
 proc-macro2 = { version = "1", features = ["span-locations"] }
 quote = { version = "1" }
-power-protobuf-lib = { version = "0.1.5" }
+power-protobuf-lib = { version = "0.1.6" }
 
 [dev-dependencies]
 tokio = { version = "1.37.0", features = ["rt-multi-thread", "macros"] }
@@ -39,11 +39,11 @@ http = { version = "1.1.0" }
 [features]
 default = ["impl_prost", "tagless", "simplize_rpc_params", "derive_serde"]
 # impl_prost: use tonic/prost to implement the protobuf codec and grpc stuff.
-impl_prost = []
+impl_prost = ["power-protobuf-lib/impl_prost"]
 # impl_protobuf_rs: use 'stepancheg/rust-protobuf' to implement the protbuf codec.
-impl_protobuf_rs = []
+impl_protobuf_rs = ["power-protobuf-lib/impl_protobuf_rs"]
 # enable serde macro derives
-derive_serde = []
+derive_serde = ["power-protobuf-lib/derive_serde"]
 # tagless: allows auto increduce tag number by previous tag, if the begging tag is not exists, initial value will be set defaultly (message begins with 1, enum begins with 0).
-tagless = []
-simplize_rpc_params = []
+tagless = ["power-protobuf-lib/tagless"]
+simplize_rpc_params = ["power-protobuf-lib/simplize_rpc_params"]

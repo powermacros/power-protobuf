@@ -1,3 +1,4 @@
+#![feature(split_at_checked)]
 mod dep;
 mod expand;
 mod model;

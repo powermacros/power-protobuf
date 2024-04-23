@@ -86,7 +86,7 @@ impl Deps {
         };
         let contents = fs::read_to_string(call_site_path)
             .map_err(|_err| input.span().to_syn_error("cannot read source file"))?;
-        slf.scan_with_contents(&contents, 0)?;
+        slf.scan_with_contents(true, &contents, 0)?;
 
         Ok(slf)
     }
@@ -159,7 +159,7 @@ impl Deps {
                     "fails to read contents while scanning potential types for importing",
                 )
             })?;
-            self.scan_with_contents(&contents, import_index)
+            self.scan_with_contents(false, &contents, import_index)
         } else {
             // unreachable!()
             Ok(())
@@ -190,24 +190,42 @@ impl Deps {
         }
     }
 
-    fn scan_with_contents(&mut self, contents: &str, import_index: usize) -> syn::Result<()> {
+    fn scan_with_contents(
+        &mut self,
+        current_source: bool,
+        contents: &str,
+        import_index: usize,
+    ) -> syn::Result<()> {
         let mut source = contents;
         let mut source_pos = 0usize;
         while !source.is_empty() {
             if let Some(macro_pos) = source.find("protobuf!") {
-                source = source.split_at(macro_pos + 10).1;
+                source = if let Some((_, next)) = source.split_at_checked(macro_pos + 10) {
+                    next
+                } else {
+                    break;
+                };
                 source_pos += 10 + macro_pos;
-                if self.current_source_range.contains(&source_pos) {
+                if current_source && self.current_source_range.contains(&source_pos) {
                     source_pos = self.current_source_range.end;
-                    source = contents.split_at(self.current_source_range.end).1;
+                    if let Some(checked) = contents.split_at_checked(self.current_source_range.end)
+                    {
+                        source = checked.1;
+                    } else {
+                        break;
+                    }
                     continue;
-                }
-                let before = source.split_at(macro_pos).0;
-                if let Some(nl) = before.rfind("\n") {
-                    // check is commented to this macro
-                    if before.split_at(nl).1.contains("//") {
-                        // has comment before protobuf!
-                        continue;
+                } else {
+                    if let Some((before, _)) = source.split_at_checked(macro_pos) {
+                        if let Some(nl) = before.rfind("\n") {
+                            // check is commented to this macro
+                            if before.split_at(nl).1.contains("//") {
+                                // has comment before protobuf!
+                                continue;
+                            }
+                        }
+                    } else {
+                        break;
                     }
                 }
             } else {
@@ -381,7 +399,7 @@ mod fast_pb_parser {
         ($tag:expr) => {
             tuple((ws, tag($tag), ws))
         };
-        ($tag1:expr,$tag2:expr) => {
+        ($tag1:expr, $tag2:expr) => {
             tuple((ws, tag($tag1), ws, tag($tag2), ws))
         };
     }

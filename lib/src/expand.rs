@@ -132,9 +132,7 @@ impl Field {
         let (optional, repeated, field_type) = self.to_type_tokens();
 
         let mut prost_args = vec![];
-        if let Some(ty) = typ.to_prost_type() {
-            prost_args.push(ty);
-        }
+        prost_args.push(typ.to_prost_type());
         if optional {
             prost_args.push(quote!(optional));
         } else if repeated {
@@ -500,16 +498,10 @@ impl Method {
     fn impl_server_trait_method(&self) -> TokenStream {
         let Self {
             method_name,
-            input_type:
-                Type {
-                    complete_path: input_type,
-                    ..
-                },
-            output_type:
-                Type {
-                    complete_path: output_type,
-                    ..
-                },
+            input_type: Type { ty: input_type, .. },
+            output_type: Type {
+                ty: output_type, ..
+            },
             ..
         } = self;
 
@@ -722,7 +714,9 @@ impl ToTokens for ProtobufPath {
 
 impl ToTokens for Type {
     fn to_tokens(&self, tokens: &mut TokenStream) {
-        let Self { complete_path, .. } = self;
+        let Self {
+            ty: complete_path, ..
+        } = self;
         tokens.append_all(quote!(#complete_path))
     }
 }
@@ -745,7 +739,7 @@ impl FieldType {
             FieldType::Double(span) => Ident::new("f64", *span).to_token_stream(),
             FieldType::String(span) => quote_spanned!(*span => ::prost::alloc::string::String),
             FieldType::Bytes(span) => quote_spanned!(*span => ::prost::alloc::vec::Vec<u8>),
-            FieldType::MessageOrEnum(ty) => ty.complete_path.to_token_stream(),
+            FieldType::MessageOrEnum(ty) => ty.ty.to_token_stream(),
             FieldType::Map(map) => {
                 let key_type = map.key.as_ref().to_tokens(None);
                 let value_type = map.value.as_ref().to_tokens(None);
@@ -776,8 +770,8 @@ impl FieldType {
         }
     }
 
-    fn to_prost_type(&self) -> Option<TokenStream> {
-        Some(match self {
+    fn to_prost_type(&self) -> TokenStream {
+        match self {
             Self::Int32(span) => ("int32", *span).to_ident().to_token_stream(),
             Self::Int64(span) => ("int64", *span).to_ident().to_token_stream(),
             Self::Uint32(span) => ("uint32", *span).to_ident().to_token_stream(),
@@ -795,17 +789,24 @@ impl FieldType {
             Self::Float(span) => ("float", *span).to_ident().to_token_stream(),
             Self::MessageOrEnum(ty) => {
                 if ty.target_is_message {
-                    ("message", ty.complete_path.span())
-                        .to_ident()
-                        .to_token_stream()
+                    ("message", ty.ty.span()).to_ident().to_token_stream()
                 } else {
                     let enum_type = ty.type_path.local_name().to_lit_str();
                     quote!(enumeration = #enum_type)
                 }
             }
             Self::Group(g) => ("group", g.name.span()).to_ident().to_token_stream(),
-            Self::Map(_) => return None,
-        })
+            Self::Map(map) => {
+                let key_type = map.key.to_prost_type().to_string();
+                let value_type = map.value.to_prost_type().to_string();
+                let map_type = (
+                    format!("{}, {}", key_type.trim(), value_type.trim()),
+                    map.key.span(),
+                )
+                    .to_lit_str();
+                quote!(map = #map_type)
+            }
+        }
     }
 }
 

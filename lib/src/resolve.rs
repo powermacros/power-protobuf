@@ -1,7 +1,7 @@
 use std::collections::HashMap;
 
 use convert_case::{Case, Casing};
-use syn::{punctuated::Punctuated, spanned::Spanned, Ident, PathSegment};
+use syn::{punctuated::Punctuated, spanned::Spanned, Ident, PathSegment, TypeTuple};
 use syn_prelude::{JoinSynErrors, ToErr, ToIdent, ToIdentWithCase, ToSynError};
 
 use crate::{
@@ -150,7 +150,7 @@ impl ResolveContext<'_> {
                 self.package.as_ref().map(|p| &p.package),
                 container,
                 &mut type_name_iter,
-                &mut typ.complete_path,
+                &mut typ.ty,
             )? {
                 typ.target_is_message = is_message;
                 return Ok(());
@@ -166,17 +166,17 @@ impl ResolveContext<'_> {
                             self.package.as_ref().map(|p| &p.package),
                             hierarchy,
                             &mut typ.type_path.segments.iter().skip(1),
-                            &mut typ.complete_path,
+                            &mut typ.ty,
                         )? {
                             typ.target_is_message = is_message;
                             return Ok(());
                         }
                     } else {
-                        typ.complete_path.push_import_with_scope(
+                        typ.ty.push_import_with_scope(
                             import0,
                             self.package.as_ref().map(|p| &p.package),
                         );
-                        typ.complete_path.push(type_path_seg_first);
+                        typ.ty.push(type_path_seg_first);
                         typ.target_is_message = true;
                         return Ok(());
                     }
@@ -188,11 +188,11 @@ impl ResolveContext<'_> {
                             .to_syn_error("cannot find this type in inner enumeration")
                             .to_err()?;
                     } else {
-                        typ.complete_path.push_import_with_scope(
+                        typ.ty.push_import_with_scope(
                             import0,
                             self.package.as_ref().map(|p| &p.package),
                         );
-                        typ.complete_path.push(e);
+                        typ.ty.push(e);
                         typ.target_is_message = false;
                         return Ok(());
                     }
@@ -248,7 +248,7 @@ impl ResolveContext<'_> {
         package: Option<&Ident>,
         hierarchy: &'a MessageHierarchy,
         type_name_iter: &mut impl Iterator<Item = &'a Ident>,
-        full_type_path: &mut syn::Path,
+        full_type_path: &mut syn::Type,
     ) -> syn::Result<Option<bool>> {
         if let Some(type_name_seg) = type_name_iter.next() {
             if let Some(msg) = hierarchy.find_message(type_name_seg) {
@@ -308,12 +308,29 @@ impl ResolveContext<'_> {
             if let Some(x) = scope.get(&type_path_str) {
                 if x.prost_type {
                     let mut type_name_iter = typ.type_path.segments.iter().skip(2);
-                    let type_name = typ.type_path.segments.last().unwrap();
-                    typ.complete_path
-                        .push(&("prost", type_name.span()).to_ident());
-                    typ.complete_path.push_type_path(&mut type_name_iter, false);
+                    if let Some(ty) = type_name_iter.next() {
+                        match ty.to_string().as_str() {
+                            "Empty" => {
+                                typ.ty = syn::Type::Tuple(TypeTuple {
+                                    paren_token: syn::token::Paren(typ.span()),
+                                    elems: Punctuated::new(),
+                                });
+                            }
+                            _ => {
+                                if let Some(inner_type) = type_name_iter.next() {
+                                    typ.ty
+                                        .push_ident(("prost", ty.span()).to_ident())
+                                        .push_ident(ty.to_ident_with_case(Case::Snake))
+                                        .push(inner_type);
+                                } else {
+                                    typ.ty.push_ident(("prost", ty.span()).to_ident()).push(ty);
+                                }
+                            }
+                        }
+                    }
                 } else {
-                    typ.complete_path
+                    typ.ty = syn::Type::new();
+                    typ.ty
                         .push_import_with_scope(self.imports.get(x.import_index).unwrap(), package)
                         .push_type_path(&mut typ.type_path.segments.iter().skip(skip), false);
                 }
@@ -336,6 +353,61 @@ pub trait PathMod {
         tailing: bool,
     ) -> &mut Self;
     fn push_type_vec(&mut self, name: &Vec<Ident>, tailing: bool) -> &mut Self;
+}
+
+impl PathMod for syn::Type {
+    fn new() -> Self {
+        syn::Type::Path(syn::TypePath {
+            qself: None,
+            path: syn::Path::new(),
+        })
+    }
+
+    fn from_idents(idents: impl Iterator<Item = Ident>) -> Self {
+        syn::Type::Path(syn::TypePath {
+            qself: None,
+            path: syn::Path::from_idents(idents),
+        })
+    }
+
+    fn push(&mut self, type_name_seg: &Ident) -> &mut Self {
+        if let syn::Type::Path(type_path) = self {
+            type_path.path.push(type_name_seg);
+        }
+        self
+    }
+
+    fn push_ident(&mut self, type_name_seg: Ident) -> &mut Self {
+        if let syn::Type::Path(type_path) = self {
+            type_path.path.push_ident(type_name_seg);
+        }
+        self
+    }
+
+    fn push_import_with_scope(&mut self, import: &Import, package: Option<&Ident>) -> &mut Self {
+        if let syn::Type::Path(type_path) = self {
+            type_path.path.push_import_with_scope(import, package);
+        }
+        self
+    }
+
+    fn push_type_path<'a>(
+        &mut self,
+        iter: &mut impl Iterator<Item = &'a Ident>,
+        tailing: bool,
+    ) -> &mut Self {
+        if let syn::Type::Path(type_path) = self {
+            type_path.path.push_type_path(iter, tailing);
+        }
+        self
+    }
+
+    fn push_type_vec(&mut self, name: &Vec<Ident>, tailing: bool) -> &mut Self {
+        if let syn::Type::Path(type_path) = self {
+            type_path.path.push_type_vec(name, tailing);
+        }
+        self
+    }
 }
 
 impl PathMod for syn::Path {
