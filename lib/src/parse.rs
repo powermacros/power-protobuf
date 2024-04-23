@@ -9,7 +9,7 @@ use proc_macro2::Span;
 use syn::{
     parse::{Parse, ParseBuffer, ParseStream},
     punctuated::Punctuated,
-    token, Ident, LitBool, LitInt, LitStr, Token,
+    token, Ident, LitBool, LitFloat, LitInt, LitStr, Token,
 };
 use syn_prelude::{
     AmmendSynError, JoinSynErrors, ParseAsIdent, ToErr, ToIdentWithCase, ToLitStr, ToSynError,
@@ -262,23 +262,13 @@ impl Parse for ProtobufConstant {
             Ok(Self::Bool(input.parse()?))
         } else if input.peek(LitStr) {
             Ok(Self::String(input.parse()?))
-        } else if input.peek(Token![-]) {
-            Self::parse_num_lit(input, true)
-        } else if input.peek(Token![+]) {
-            Self::parse_num_lit(input, false)
+        } else if input.peek(LitFloat) {
+            Ok(Self::Float(input.parse()?))
+        } else if input.peek(LitInt) {
+            Ok(Self::Int(input.parse()?))
         } else {
-            Self::parse_num_lit(input, false)
+            Ok(Self::Ident(input.parse()?))
         }
-    }
-}
-
-impl ProtobufConstant {
-    fn parse_num_lit(input: ParseStream, neg: bool) -> syn::Result<Self> {
-        Ok(if input.peek(LitInt) {
-            Self::U64(input.parse()?, neg)
-        } else {
-            Self::F64(input.parse()?, neg)
-        })
     }
 }
 

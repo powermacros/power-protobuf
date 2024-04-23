@@ -413,8 +413,8 @@ pub struct ProtobufConstantMessage {
 #[derive(Debug, Clone)]
 #[allow(unused)]
 pub enum ProtobufConstant {
-    U64(LitInt, bool),
-    F64(LitFloat, bool),
+    Int(LitInt),
+    Float(LitFloat),
     Bool(LitBool),
     Ident(ProtobufPath),
     String(LitStr),
@@ -472,6 +472,72 @@ pub struct ProtobufOption {
 
 pub trait GetOption {
     fn get_option<'a>(&'a self, name: &str) -> Option<&'a ProtobufOption>;
+    fn get_string_option<'a>(&'a self, name: &str) -> Option<&'a LitStr> {
+        if let Some(ProtobufOption {
+            value: ProtobufConstant::String(value),
+            ..
+        }) = self.get_option(name)
+        {
+            Some(value)
+        } else {
+            None
+        }
+    }
+    fn get_bool_option<'a>(&'a self, name: &str) -> Option<&'a LitBool> {
+        if let Some(ProtobufOption {
+            value: ProtobufConstant::Bool(value),
+            ..
+        }) = self.get_option(name)
+        {
+            Some(value)
+        } else {
+            None
+        }
+    }
+    fn get_int_option<'a>(&'a self, name: &str) -> Option<&'a LitInt> {
+        if let Some(ProtobufOption {
+            value: ProtobufConstant::Int(value),
+            ..
+        }) = self.get_option(name)
+        {
+            Some(value)
+        } else {
+            None
+        }
+    }
+    fn get_float_option<'a>(&'a self, name: &str) -> Option<&'a LitFloat> {
+        if let Some(ProtobufOption {
+            value: ProtobufConstant::Float(value),
+            ..
+        }) = self.get_option(name)
+        {
+            Some(value)
+        } else {
+            None
+        }
+    }
+    fn get_ident_option<'a>(&'a self, name: &str) -> Option<&'a ProtobufPath> {
+        if let Some(ProtobufOption {
+            value: ProtobufConstant::Ident(value),
+            ..
+        }) = self.get_option(name)
+        {
+            Some(value)
+        } else {
+            None
+        }
+    }
+    fn get_object_option<'a>(&'a self, name: &str) -> Option<&'a ProtobufConstantMessage> {
+        if let Some(ProtobufOption {
+            value: ProtobufConstant::Message(value),
+            ..
+        }) = self.get_option(name)
+        {
+            Some(value)
+        } else {
+            None
+        }
+    }
 }
 
 impl GetOption for Vec<ProtobufOption> {
