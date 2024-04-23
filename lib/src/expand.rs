@@ -170,7 +170,7 @@ impl Field {
                 }
                 Modifier::Required => field_type,
             }
-        } else if !enum_field && typ.is_message_or_enum() {
+        } else if !enum_field && typ.is_message() {
             quote!(Option<#field_type>)
         } else {
             field_type
@@ -739,7 +739,13 @@ impl FieldType {
             FieldType::Double(span) => Ident::new("f64", *span).to_token_stream(),
             FieldType::String(span) => quote_spanned!(*span => ::prost::alloc::string::String),
             FieldType::Bytes(span) => quote_spanned!(*span => ::prost::alloc::vec::Vec<u8>),
-            FieldType::MessageOrEnum(ty) => ty.ty.to_token_stream(),
+            FieldType::MessageOrEnum(ty) => {
+                if ty.target_is_message {
+                    ty.ty.to_token_stream()
+                } else {
+                    Ident::new("i32", ty.type_path.span()).to_token_stream()
+                }
+            }
             FieldType::Map(map) => {
                 let key_type = map.key.as_ref().to_tokens(None);
                 let value_type = map.value.as_ref().to_tokens(None);

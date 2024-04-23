@@ -213,9 +213,9 @@ impl FieldType {
             Self::Group(group) => group.name.span(),
         }
     }
-    pub fn is_message_or_enum(&self) -> bool {
+    pub fn is_message(&self) -> bool {
         match self {
-            Self::MessageOrEnum(_) => true,
+            Self::MessageOrEnum(t) => t.target_is_message,
             _ => false,
         }
     }
