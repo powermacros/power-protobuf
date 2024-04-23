@@ -11,16 +11,16 @@ protobuf! {
 
     message IpAddress {
       oneof version {
-        fixed32 ipv4 = 1;
-        Ipv6 ipv6 = 2;
+        fixed32 ipv4;
+        Ipv6 ipv6;
       }
     }
 
     message Ipv6 {
-      uint32 ab = 1;
-      uint32 cd = 2;
-      uint32 ef = 3;
-      uint32 gh = 4;
+      uint32 ab;
+      uint32 cd;
+      uint32 ef;
+      uint32 gh;
     }
 }
 

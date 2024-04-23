@@ -640,7 +640,7 @@ impl Message {
     }
 }
 
-#[derive(Copy, Clone)]
+#[derive(Copy, Clone, PartialEq, Eq)]
 enum MessageBodyParseMode {
     MessageProto2,
     MessageProto3,
@@ -870,7 +870,9 @@ impl MessageBody {
             )?));
         }
 
-        r.check_tags()?;
+        if mode != MessageBodyParseMode::Oneof {
+            r.check_tags()?;
+        }
 
         Ok(r)
     }
@@ -905,42 +907,35 @@ impl MessageBody {
             field: &mut Field,
             reserved_nums: &Vec<RangeInclusive<i32>>,
             tag_used: &mut HashMap<i32, Span>,
-            next_tag: i32,
+            mut next_tag: i32,
             ref_tag_span: Option<Span>,
         ) -> syn::Result<(i32, Option<Span>)> {
-            macro_rules! throw_if_reserved {
-                ($value:expr, $span:expr, $reserved_error:expr, $occupied_error:expr) => {
-                    for range in reserved_nums.iter() {
-                        if range.contains($value) {
-                            return Err(syn::Error::new($span, $reserved_error));
-                        }
-                    }
-                    if let Some(prev_span) = tag_used.get($value) {
-                        let span = if let Some(new_span) = ($span).join(*prev_span) {
-                            new_span
-                        } else {
-                            $span
-                        };
-                        return Err(syn::Error::new(span, $occupied_error));
-                    }
-                };
-                ($value:expr, $span:expr) => {
-                    throw_if_reserved!($value, $span, "this tag is reserved!", "The tag is used")
-                };
-            }
             match &field.tag {
                 TagValue::Value(span, value) => {
-                    throw_if_reserved!(value, *span);
+                    for range in reserved_nums.iter() {
+                        if range.contains(value) {
+                            return span.to_syn_error("tag number is reserved").to_err();
+                        }
+                    }
+                    if let Some(_) = tag_used.get(value) {
+                        return span.to_syn_error("tag number is used").to_err();
+                    }
                     tag_used.insert(*value, *span);
                     Ok((*value + 1, Some(*span)))
                 }
                 TagValue::AutoIncr => {
-                    throw_if_reserved!(
-                        &next_tag,
-                        field.field_name.span(),
-                        &format!("tag number({}) is reserved", next_tag),
-                        &format!("tag number({}) is used", next_tag)
-                    );
+                    while next_tag < i32::MAX {
+                        for range in reserved_nums.iter() {
+                            if range.contains(&next_tag) {
+                                next_tag = range.end() + 1;
+                                continue;
+                            }
+                        }
+                        if tag_used.contains_key(&next_tag) {
+                            next_tag += 1;
+                            continue;
+                        }
+                    }
                     tag_used.insert(next_tag, field.field_name.span());
                     field.tag =
                         TagValue::Value(ref_tag_span.unwrap_or(field.field_name.span()), next_tag);
@@ -970,6 +965,15 @@ impl MessageBody {
                             ref_tag_span,
                         )?;
                     }
+                    oneof.tags = LitStr::new(
+                        &oneof
+                            .fields
+                            .iter()
+                            .map(|f| f.tag.to_lit_str().value())
+                            .collect::<Vec<_>>()
+                            .join(", "),
+                        oneof.tags.span(),
+                    );
                 }
             }
         }
@@ -1202,14 +1206,6 @@ impl OneOf {
                     span = s;
                 }
             }
-            let tags = LitStr::new(
-                &fields
-                    .iter()
-                    .map(|f| f.tag.to_lit_str().value())
-                    .collect::<Vec<_>>()
-                    .join(", "),
-                span,
-            );
 
             let nested_mod_name = parent_name
                 .ok_or(syn::Error::new(name.span(), "missing parent message"))?
@@ -1224,7 +1220,7 @@ impl OneOf {
                     .with_prefix(format!("{}::", nested_mod_name.to_string())),
                 enum_name,
                 nested_mod_name,
-                tags,
+                tags: ("", span).to_lit_str(),
                 name,
                 fields,
                 options,
