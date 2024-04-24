@@ -12,6 +12,12 @@ use crate::model::{
 
 impl ToTokens for Protocol {
     fn to_tokens(&self, tokens: &mut TokenStream) {
+        self.to_token_stream_with_extra(tokens, TokenStream::new())
+    }
+}
+
+impl Protocol {
+    pub fn to_token_stream_with_extra(&self, tokens: &mut TokenStream, extra: TokenStream) {
         let decls = self
             .decls
             .iter()
@@ -27,11 +33,13 @@ impl ToTokens for Protocol {
             tokens.append_all(quote! {
                 pub mod #package {
                     #(#decls)*
+                    #extra
                 }
             })
         } else {
             tokens.append_all(quote! {
                 #(#decls)*
+                #extra
             })
         }
     }
