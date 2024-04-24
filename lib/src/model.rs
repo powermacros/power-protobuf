@@ -281,7 +281,6 @@ pub struct Message {
     /// Message name
     pub name: Ident,
     pub struct_name: Ident,
-    pub nested_mod_name: Option<Ident>,
     /// Message fields and oneofs
     pub fields: Vec<MessageElement>,
     /// Message reserved numbers
@@ -320,7 +319,6 @@ pub struct EnumValue {
 /// A protobuf enumerator
 #[derive(Debug, Clone)]
 pub struct Enumeration {
-    pub nested_mod_name: Option<Ident>,
     /// enum name
     pub name: Ident,
     /// enum values
@@ -339,7 +337,6 @@ pub struct OneOf {
     /// OneOf name
     pub name: Ident,
     pub field_name: Ident,
-    pub nested_mod_name: Ident,
     pub field_lit: LitStr,
     pub enum_name: Ident,
     pub tags: LitStr,

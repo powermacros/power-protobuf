@@ -58,7 +58,7 @@ impl Protocol {
                 input.parse::<Token![;]>()?;
                 continue;
             }
-            if let Some(message) = Message::try_parse(input, proto_version, None)
+            if let Some(message) = Message::try_parse(input, proto_version)
                 .add_error_suffix("while parsing message")?
             {
                 protocol
@@ -91,7 +91,7 @@ impl Protocol {
                         .push(DeclIndex::Message(protocol.messages.len()));
                     protocol.messages.push(message);
                 }
-            } else if let Some(enumeration) = Enumeration::try_parse(input, proto_version, None)
+            } else if let Some(enumeration) = Enumeration::try_parse(input, proto_version)
                 .add_error_suffix("while parsing enumeration")?
             {
                 protocol.decls.push(DeclIndex::Enum(protocol.enums.len()));
@@ -480,7 +480,6 @@ impl Method {
                     .to_ident_with_case(Case::UpperCamel)
                     .with_suffix(suffix);
                 let message = Message {
-                    nested_mod_name: None,
                     struct_name: message_name.clone(),
                     name: message_name.clone(),
                     fields,
@@ -515,7 +514,6 @@ impl Method {
                     false,
                 )?;
                 let message = Message {
-                    nested_mod_name: None,
                     struct_name: message_name.clone(),
                     name: message_name.clone(),
                     fields,
@@ -589,11 +587,7 @@ impl Parse for TryAsOptions {
 }
 
 impl Message {
-    fn try_parse(
-        input: ParseStream,
-        proto_version: usize,
-        parent_name: Option<&Ident>,
-    ) -> syn::Result<Option<Self>> {
+    fn try_parse(input: ParseStream, proto_version: usize) -> syn::Result<Option<Self>> {
         if let Some(_) = input.try_parse_as_ident("message", false) {
             let name = input.parse_as_ident()?;
             let MessageBody {
@@ -617,7 +611,6 @@ impl Message {
             Ok(Some(Self {
                 nested_types,
                 struct_name: name.to_ident_with_case(Case::UpperCamel),
-                nested_mod_name: parent_name.map(|name| name.to_ident_with_case(Case::Snake)),
                 name,
                 fields,
                 reserved_nums,
@@ -807,13 +800,13 @@ impl MessageBody {
                     r.extensions.extend(extensions);
                     continue;
                 }
-                if let Some(nested) = Message::try_parse(&inner, proto_version, parent_name)? {
+                if let Some(nested) = Message::try_parse(&inner, proto_version)? {
                     r.nested_types
                         .push(NestedTypeIndex::Message(r.messages.len()));
                     r.messages.push(nested);
                     continue;
                 }
-                if let Some(nested) = Enumeration::try_parse(&inner, proto_version, parent_name)? {
+                if let Some(nested) = Enumeration::try_parse(&inner, proto_version)? {
                     r.nested_types.push(NestedTypeIndex::Enum(r.enums.len()));
                     r.enums.push(nested);
                     continue;
@@ -1228,7 +1221,6 @@ impl OneOf {
                     .to_lit_str()
                     .with_prefix(format!("{}::", nested_mod_name.to_string())),
                 enum_name,
-                nested_mod_name,
                 tags: ("", span).to_lit_str(),
                 name,
                 fields,
@@ -1276,11 +1268,7 @@ impl Extension {
 }
 
 impl Enumeration {
-    fn try_parse(
-        input: ParseStream,
-        _proto_version: usize,
-        parent_name: Option<&Ident>,
-    ) -> syn::Result<Option<Self>> {
+    fn try_parse(input: ParseStream, _proto_version: usize) -> syn::Result<Option<Self>> {
         if let Some(_) = input.try_parse_as_ident("enum", false) {
             let name = input.parse_as_ident()?;
             let mut values: Vec<EnumValue> = Vec::new();
@@ -1344,7 +1332,6 @@ impl Enumeration {
             }
 
             Ok(Some(Self {
-                nested_mod_name: parent_name.map(|name| name.to_ident_with_case(Case::Snake)),
                 name,
                 values,
                 options,
