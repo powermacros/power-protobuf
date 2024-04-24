@@ -7,3 +7,4 @@ mod resolve;
 
 pub use dep::*;
 pub use model::*;
+pub use resolve::PathMod;
