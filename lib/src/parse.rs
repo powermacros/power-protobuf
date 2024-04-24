@@ -29,10 +29,10 @@ use crate::{
 };
 
 impl Protocol {
-    pub fn parse_from_call_site<BeforeCheck: Fn(&mut Protocol) -> syn::Result<()>>(
+    pub fn parse_from_call_site<BeforeCheck: FnMut(&mut Protocol) -> syn::Result<()>>(
         input: ParseStream,
         call_site_path: PathBuf,
-        before_check: BeforeCheck,
+        mut before_check: BeforeCheck,
     ) -> syn::Result<Self> {
         let syntax: Syntax = input.parse()?;
         let mut protocol = Self {
