@@ -6,8 +6,8 @@ use syn_prelude::{ToIdent, ToIdentWithCase, ToLitStr, WithPrefix, WithSuffix};
 
 use crate::model::{
     DeclIndex, EnumValue, Enumeration, Field, FieldType, GetOption, Message, MessageElement,
-    Method, Modifier, NestedTypeIndex, OneOf, Package, ProtobufConstant, ProtobufOption,
-    ProtobufPath, Protocol, Service, Type,
+    Method, Modifier, NestedTypeIndex, OneOf, Package, ProtobufOption, ProtobufPath, Protocol,
+    Service, Type,
 };
 
 impl ToTokens for Protocol {
@@ -758,14 +758,9 @@ impl FieldType {
                 let key_type = map.key.as_ref().to_tokens(None);
                 let value_type = map.value.as_ref().to_tokens(None);
 
-                let opt = options
-                    .map(|opts| opts.iter().find(|opt| opt.name.is_option("map_type")))
-                    .flatten();
-
-                if let Some(ProtobufOption {
-                    value: ProtobufConstant::String(value),
-                    ..
-                }) = opt
+                if let Some(value) = options
+                    .map(|opts| opts.get_string_option("map_type"))
+                    .flatten()
                 {
                     let opt = value.value();
                     if opt.eq("hash") || opt.eq("HashMap") {
@@ -826,23 +821,15 @@ impl FieldType {
 
 trait Deprecated: GetOption {
     fn deprecated(&self) -> Option<TokenStream> {
-        self.get_option("deprecated")
-            .map(|opt| {
-                if let ProtobufOption {
-                    value: ProtobufConstant::Bool(value),
-                    ..
-                } = opt
-                {
-                    if value.value() {
-                        Some(quote!(#[deprecated]))
-                    } else {
-                        None
-                    }
-                } else {
-                    None
-                }
-            })
-            .flatten()
+        if self
+            .get_bool_option("deprecated")
+            .map(|opt| opt.value())
+            .unwrap_or_default()
+        {
+            Some(quote!(#[deprecated]))
+        } else {
+            None
+        }
     }
 }
 

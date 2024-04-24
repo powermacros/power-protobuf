@@ -1,6 +1,6 @@
 [package]
 name = "power-protobuf"
-version = "0.1.10"
+version = "0.1.11"
 edition = "2021"
 description = "a proc-macro for embedding protobuf inside rust code"
 license = "MIT"
@@ -26,7 +26,7 @@ proc-macro = true
 syn = { version = "2", features = ["full", "extra-traits"] }
 proc-macro2 = { version = "1", features = ["span-locations"] }
 quote = { version = "1" }
-power-protobuf-lib = { version = "0.1.10" }
+power-protobuf-lib = { version = "0.1.11" }
 
 [dev-dependencies]
 tokio = { version = "1.37.0", features = ["rt-multi-thread", "macros"] }
